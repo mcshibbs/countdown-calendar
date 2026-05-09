@@ -65,7 +65,8 @@ sed \
 
 chmod 0644 "${SERVICE_PATH}"
 systemctl daemon-reload
-systemctl enable --now "${SERVICE_NAME}"
+systemctl enable "${SERVICE_NAME}"
+systemctl restart "${SERVICE_NAME}"
 
 server_ip="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
 
