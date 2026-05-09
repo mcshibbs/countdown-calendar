@@ -10,11 +10,14 @@
     <main class="app-shell">
       <header class="app-header">
         <h1>Countdown Calendar</h1>
-        <nav class="app-nav" aria-label="Primary navigation">
-          <button class="nav-button is-active" type="button" data-view-target="home">Home</button>
-          <button class="nav-button" type="button" data-view-target="add">Add Event</button>
-          <button class="nav-button" type="button" data-view-target="settings">Settings</button>
-        </nav>
+        <details id="nav-menu" class="nav-menu">
+          <summary class="menu-button">Menu</summary>
+          <nav class="app-nav" aria-label="Primary navigation">
+            <button class="nav-button is-active" type="button" data-view-target="home">Home</button>
+            <button class="nav-button" type="button" data-open-event-modal>Add Event</button>
+            <button class="nav-button" type="button" data-view-target="settings">Settings</button>
+          </nav>
+        </details>
       </header>
 
       <section id="home-view" class="view is-active" aria-label="Countdown calendar home">
@@ -39,67 +42,6 @@
           <div id="category-legend" class="category-legend" aria-label="Categories"></div>
           <div id="event-list" class="event-list" aria-live="polite"></div>
         </section>
-      </section>
-
-      <section id="add-view" class="view" aria-label="Add calendar event">
-        <details id="event-editor" class="event-editor" open>
-          <summary class="editor-summary">
-            <span id="form-title">Add event</span>
-            <span class="summary-hint">Toggle</span>
-          </summary>
-
-          <form id="event-form" class="event-form">
-            <div class="form-heading">
-              <p class="form-note">Manual entries can be one-time dates or yearly dates like birthdays and anniversaries.</p>
-              <button class="button button-ghost hidden" id="cancel-edit" type="button">Cancel</button>
-            </div>
-
-            <label>
-              <span>Subject</span>
-              <input id="title" name="title" autocomplete="off" maxlength="140" required>
-            </label>
-
-            <div class="form-row">
-              <label>
-                <span>Date</span>
-                <input id="event-date" name="eventDate" type="date" required>
-              </label>
-              <fieldset class="segmented" aria-label="Recurrence">
-                <legend>Repeats</legend>
-                <label>
-                  <input type="radio" name="recurrence" value="none" checked>
-                  <span>Once</span>
-                </label>
-                <label>
-                  <input type="radio" name="recurrence" value="annual">
-                  <span>Yearly</span>
-                </label>
-              </fieldset>
-            </div>
-
-            <label>
-              <span>Category</span>
-              <input id="category-name" name="categoryName" list="category-options" autocomplete="off" required>
-              <datalist id="category-options"></datalist>
-            </label>
-
-            <div class="form-row color-row">
-              <label>
-                <span>Color</span>
-                <input id="category-color" name="categoryColor" type="color" value="#14b8a6">
-              </label>
-              <div id="color-state" class="color-state">New category</div>
-            </div>
-
-            <label>
-              <span>Notes</span>
-              <textarea id="notes" name="notes" rows="3" maxlength="500"></textarea>
-            </label>
-
-            <button class="button button-primary full-width" id="submit-button" type="submit">Add event</button>
-            <p id="form-message" class="form-message" role="status"></p>
-          </form>
-        </details>
       </section>
 
       <section id="settings-view" class="view" aria-label="Settings">
@@ -156,6 +98,68 @@
           </section>
         </div>
       </section>
+
+      <dialog id="event-dialog" class="event-dialog" aria-labelledby="form-title">
+        <div class="modal-header">
+          <div>
+            <p class="eyebrow">Manual</p>
+            <h2 id="form-title">Add event</h2>
+          </div>
+          <button class="icon-button" id="close-event-modal" type="button" aria-label="Close">x</button>
+        </div>
+
+        <form id="event-form" class="event-form">
+          <div class="form-heading">
+            <p class="form-note">Manual entries can be one-time dates or yearly dates like birthdays and anniversaries.</p>
+            <button class="button button-ghost hidden" id="cancel-edit" type="button">Cancel</button>
+          </div>
+
+          <label>
+            <span>Subject</span>
+            <input id="title" name="title" autocomplete="off" maxlength="140" required>
+          </label>
+
+          <div class="form-row">
+            <label>
+              <span>Date</span>
+              <input id="event-date" name="eventDate" type="date" required>
+            </label>
+            <fieldset class="segmented" aria-label="Recurrence">
+              <legend>Repeats</legend>
+              <label>
+                <input type="radio" name="recurrence" value="none" checked>
+                <span>Once</span>
+              </label>
+              <label>
+                <input type="radio" name="recurrence" value="annual">
+                <span>Yearly</span>
+              </label>
+            </fieldset>
+          </div>
+
+          <label>
+            <span>Category</span>
+            <input id="category-name" name="categoryName" list="category-options" autocomplete="off" required>
+            <datalist id="category-options"></datalist>
+          </label>
+
+          <div class="form-row color-row">
+            <label>
+              <span>Color</span>
+              <input id="category-color" name="categoryColor" type="color" value="#14b8a6">
+            </label>
+            <div id="color-state" class="color-state">New category</div>
+          </div>
+
+          <label>
+            <span>Notes</span>
+            <textarea id="notes" name="notes" rows="3" maxlength="500"></textarea>
+          </label>
+
+          <button class="button button-primary full-width" id="submit-button" type="submit">Add event</button>
+          <p id="form-message" class="form-message" role="status"></p>
+        </form>
+      </dialog>
     </main>
 
     <script type="module" src="/app.js"></script>

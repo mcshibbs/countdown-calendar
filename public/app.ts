@@ -35,7 +35,7 @@ type ImportResponse = {
   errors: string[];
 };
 
-type ViewName = "home" | "add" | "settings";
+type ViewName = "home" | "settings";
 
 const state: {
   categories: Category[];
@@ -50,11 +50,14 @@ const state: {
 };
 
 const navButtons = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-view-target]"));
+const openEventButtons = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-open-event-modal]"));
 const views = Array.from(document.querySelectorAll<HTMLElement>(".view"));
-const eventEditor = document.querySelector("#event-editor") as HTMLDetailsElement;
+const navMenu = document.querySelector("#nav-menu") as HTMLDetailsElement;
+const eventDialog = document.querySelector("#event-dialog") as HTMLDialogElement;
+const closeEventModalButton = document.querySelector("#close-event-modal") as HTMLButtonElement;
 
 const form = document.querySelector("#event-form") as HTMLFormElement;
-const formTitle = document.querySelector("#form-title") as HTMLSpanElement;
+const formTitle = document.querySelector("#form-title") as HTMLHeadingElement;
 const submitButton = document.querySelector("#submit-button") as HTMLButtonElement;
 const cancelEditButton = document.querySelector("#cancel-edit") as HTMLButtonElement;
 const formMessage = document.querySelector("#form-message") as HTMLParagraphElement;
@@ -87,11 +90,26 @@ const dateFormatter = new Intl.DateTimeFormat(undefined, {
 navButtons.forEach((button) => {
   button.addEventListener("click", () => {
     showView((button.dataset.viewTarget ?? "home") as ViewName);
+    closeMenu();
+  });
+});
+
+openEventButtons.forEach((button) => {
+  button.addEventListener("click", () => {
+    showView("home");
+    openEventModal();
+    closeMenu();
   });
 });
 
 form.addEventListener("submit", handleSubmit);
-cancelEditButton.addEventListener("click", resetForm);
+cancelEditButton.addEventListener("click", closeEventModal);
+closeEventModalButton.addEventListener("click", closeEventModal);
+eventDialog.addEventListener("click", (event) => {
+  if (event.target === eventDialog) {
+    closeEventModal();
+  }
+});
 categoryInput.addEventListener("input", syncCategoryColor);
 rangeDays.addEventListener("change", refreshEvents);
 
@@ -104,7 +122,13 @@ async function initialize(): Promise<void> {
   setTodayAsDefault();
   await refreshCategories();
   await refreshEvents();
-  showView(viewFromHash());
+  const initialHash = window.location.hash.replace("#", "");
+  const initialView = viewFromHash();
+  showView(initialView);
+
+  if (initialHash === "add") {
+    openEventModal();
+  }
 }
 
 async function refreshCategories(): Promise<void> {
@@ -132,10 +156,6 @@ function showView(viewName: ViewName): void {
     button.classList.toggle("is-active", button.dataset.viewTarget === viewName);
   });
 
-  if (viewName === "add") {
-    eventEditor.open = true;
-  }
-
   if (window.location.hash !== `#${viewName}`) {
     window.history.replaceState(null, "", `#${viewName}`);
   }
@@ -143,10 +163,30 @@ function showView(viewName: ViewName): void {
 
 function viewFromHash(): ViewName {
   const hash = window.location.hash.replace("#", "");
-  if (hash === "add" || hash === "settings") {
+  if (hash === "settings") {
     return hash;
   }
   return "home";
+}
+
+function openEventModal(): void {
+  if (!eventDialog.open) {
+    eventDialog.showModal();
+  }
+
+  titleInput.focus();
+}
+
+function closeEventModal(): void {
+  if (eventDialog.open) {
+    eventDialog.close();
+  }
+
+  resetForm();
+}
+
+function closeMenu(): void {
+  navMenu.open = false;
 }
 
 function renderCategories(): void {
@@ -256,6 +296,7 @@ async function handleSubmit(event: SubmitEvent): Promise<void> {
     resetForm(false);
     await refreshCategories();
     await refreshEvents();
+    closeEventModal();
     showView("home");
   } catch (error) {
     setMessage(error instanceof Error ? error.message : "Something went wrong.", true);
@@ -331,8 +372,8 @@ function startEditing(event: CalendarEvent): void {
   submitButton.textContent = "Save changes";
   cancelEditButton.classList.remove("hidden");
   syncCategoryColor();
-  showView("add");
-  titleInput.focus();
+  showView("home");
+  openEventModal();
 }
 
 function resetForm(clearMessage = true): void {

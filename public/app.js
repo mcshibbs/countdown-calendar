@@ -6,8 +6,11 @@ const state = {
     activeView: "home"
 };
 const navButtons = Array.from(document.querySelectorAll("[data-view-target]"));
+const openEventButtons = Array.from(document.querySelectorAll("[data-open-event-modal]"));
 const views = Array.from(document.querySelectorAll(".view"));
-const eventEditor = document.querySelector("#event-editor");
+const navMenu = document.querySelector("#nav-menu");
+const eventDialog = document.querySelector("#event-dialog");
+const closeEventModalButton = document.querySelector("#close-event-modal");
 const form = document.querySelector("#event-form");
 const formTitle = document.querySelector("#form-title");
 const submitButton = document.querySelector("#submit-button");
@@ -39,10 +42,24 @@ const dateFormatter = new Intl.DateTimeFormat(undefined, {
 navButtons.forEach((button)=>{
     button.addEventListener("click", ()=>{
         showView(button.dataset.viewTarget ?? "home");
+        closeMenu();
+    });
+});
+openEventButtons.forEach((button)=>{
+    button.addEventListener("click", ()=>{
+        showView("home");
+        openEventModal();
+        closeMenu();
     });
 });
 form.addEventListener("submit", handleSubmit);
-cancelEditButton.addEventListener("click", resetForm);
+cancelEditButton.addEventListener("click", closeEventModal);
+closeEventModalButton.addEventListener("click", closeEventModal);
+eventDialog.addEventListener("click", (event)=>{
+    if (event.target === eventDialog) {
+        closeEventModal();
+    }
+});
 categoryInput.addEventListener("input", syncCategoryColor);
 rangeDays.addEventListener("change", refreshEvents);
 importForm.addEventListener("submit", handleImport);
@@ -52,7 +69,12 @@ async function initialize() {
     setTodayAsDefault();
     await refreshCategories();
     await refreshEvents();
-    showView(viewFromHash());
+    const initialHash = window.location.hash.replace("#", "");
+    const initialView = viewFromHash();
+    showView(initialView);
+    if (initialHash === "add") {
+        openEventModal();
+    }
 }
 async function refreshCategories() {
     const data = await apiGet("/api/categories");
@@ -74,19 +96,31 @@ function showView(viewName) {
     navButtons.forEach((button)=>{
         button.classList.toggle("is-active", button.dataset.viewTarget === viewName);
     });
-    if (viewName === "add") {
-        eventEditor.open = true;
-    }
     if (window.location.hash !== `#${viewName}`) {
         window.history.replaceState(null, "", `#${viewName}`);
     }
 }
 function viewFromHash() {
     const hash = window.location.hash.replace("#", "");
-    if (hash === "add" || hash === "settings") {
+    if (hash === "settings") {
         return hash;
     }
     return "home";
+}
+function openEventModal() {
+    if (!eventDialog.open) {
+        eventDialog.showModal();
+    }
+    titleInput.focus();
+}
+function closeEventModal() {
+    if (eventDialog.open) {
+        eventDialog.close();
+    }
+    resetForm();
+}
+function closeMenu() {
+    navMenu.open = false;
 }
 function renderCategories() {
     categoryOptions.innerHTML = state.categories.map((category)=>`<option value="${escapeHtml(category.name)}"></option>`).join("");
@@ -175,6 +209,7 @@ async function handleSubmit(event) {
         resetForm(false);
         await refreshCategories();
         await refreshEvents();
+        closeEventModal();
         showView("home");
     } catch (error) {
         setMessage(error instanceof Error ? error.message : "Something went wrong.", true);
@@ -237,8 +272,8 @@ function startEditing(event) {
     submitButton.textContent = "Save changes";
     cancelEditButton.classList.remove("hidden");
     syncCategoryColor();
-    showView("add");
-    titleInput.focus();
+    showView("home");
+    openEventModal();
 }
 function resetForm(clearMessage = true) {
     state.editingId = null;
