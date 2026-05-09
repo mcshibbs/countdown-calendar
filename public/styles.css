@@ -22,6 +22,7 @@
 body {
   margin: 0;
   min-width: 320px;
+  padding-bottom: env(safe-area-inset-bottom);
 }
 
 button,
@@ -142,7 +143,7 @@ p {
 
 h1 {
   margin-bottom: 0;
-  font-size: clamp(2rem, 5vw, 3.8rem);
+  font-size: 3.5rem;
   line-height: 0.95;
 }
 
@@ -564,12 +565,33 @@ input[type="color"]:disabled {
   .settings-grid {
     grid-template-columns: 1fr;
   }
+
+  h1 {
+    font-size: 2.75rem;
+  }
 }
 
 @media (max-width: 560px) {
   .app-shell {
-    width: min(100% - 20px, 1180px);
-    padding: 18px 0;
+    width: min(100% - 24px, 1180px);
+    padding: max(18px, env(safe-area-inset-top)) 0 28px;
+  }
+
+  .app-header {
+    justify-items: center;
+    gap: 16px;
+    margin-bottom: 18px;
+    text-align: center;
+  }
+
+  h1 {
+    font-size: 2.35rem;
+    line-height: 1.05;
+  }
+
+  .nav-menu {
+    max-width: 480px;
+    margin: 0 auto;
   }
 
   .header-actions,
@@ -588,6 +610,65 @@ input[type="color"]:disabled {
   .nav-menu,
   .app-nav {
     width: 100%;
+  }
+
+  .app-nav {
+    left: 50%;
+    right: auto;
+    transform: translateX(-50%);
+  }
+
+  .countdown-panel,
+  .settings-panel {
+    padding: 18px 16px;
+  }
+
+  .panel-toolbar {
+    gap: 16px;
+    margin-bottom: 12px;
+  }
+
+  .range-control {
+    width: 100%;
+  }
+
+  .range-control select {
+    max-width: 180px;
+  }
+
+  .category-legend {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 8px;
+    padding: 8px 0 18px;
+  }
+
+  .category-legend > .category-pill {
+    width: 100%;
+    justify-content: flex-start;
+    min-height: 42px;
+    border-radius: 8px;
+    padding: 0 14px;
+  }
+
+  .event-list {
+    gap: 12px;
+  }
+
+  .event-card {
+    gap: 12px;
+    padding: 16px;
+  }
+
+  .event-meta {
+    display: grid;
+    gap: 8px;
+    align-items: start;
+  }
+
+  .event-meta .category-pill {
+    width: fit-content;
+    max-width: 100%;
   }
 
   .countdown {
