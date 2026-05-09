@@ -2,7 +2,7 @@
 
 A dependency-free HTML/CSS/TypeScript countdown calendar with a SQLite database. It seeds U.S. federal holidays in orange, Christian holidays in yellow, and lets you add birthdays, anniversaries, and any other event with custom category colors.
 
-Version 1.1 adds Home/Add Event/Settings navigation, moves exports into Settings, and includes bulk import for `.ics`, JSON, and CSV files. Version 1.1.1 folds navigation into a collapsible menu and opens Add Event as a modal over the Home screen. Version 1.1.2 improves iOS/mobile spacing and stacks category labels vertically on narrow screens.
+Version 1.1 adds Home/Add Event/Settings navigation, moves exports into Settings, and includes bulk import for `.ics`, JSON, and CSV files. Version 1.1.1 folds navigation into a collapsible menu and opens Add Event as a modal over the Home screen. Version 1.1.2 improves iOS/mobile spacing and stacks category labels vertically on narrow screens. Version 1.1.3 adds a collapsible calendar filter with per-category on/off toggles.
 
 ## Local Run
 

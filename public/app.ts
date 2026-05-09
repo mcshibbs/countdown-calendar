@@ -37,16 +37,20 @@ type ImportResponse = {
 
 type ViewName = "home" | "settings";
 
+const CATEGORY_FILTER_STORAGE_KEY = "countdown-calendar-hidden-categories";
+
 const state: {
   categories: Category[];
   events: CalendarEvent[];
   editingId: number | null;
   activeView: ViewName;
+  hiddenCategoryIds: Set<number>;
 } = {
   categories: [],
   events: [],
   editingId: null,
-  activeView: "home"
+  activeView: "home",
+  hiddenCategoryIds: loadHiddenCategoryIds()
 };
 
 const navButtons = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-view-target]"));
@@ -70,6 +74,9 @@ const notesInput = document.querySelector("#notes") as HTMLTextAreaElement;
 const categoryOptions = document.querySelector("#category-options") as HTMLDataListElement;
 const eventList = document.querySelector("#event-list") as HTMLDivElement;
 const categoryLegend = document.querySelector("#category-legend") as HTMLDivElement;
+const filterSummaryCount = document.querySelector("#filter-summary-count") as HTMLSpanElement;
+const showAllCategoriesButton = document.querySelector("#show-all-categories") as HTMLButtonElement;
+const hideAllCategoriesButton = document.querySelector("#hide-all-categories") as HTMLButtonElement;
 const rangeDays = document.querySelector("#range-days") as HTMLSelectElement;
 
 const importForm = document.querySelector("#import-form") as HTMLFormElement;
@@ -112,6 +119,8 @@ eventDialog.addEventListener("click", (event) => {
 });
 categoryInput.addEventListener("input", syncCategoryColor);
 rangeDays.addEventListener("change", refreshEvents);
+showAllCategoriesButton.addEventListener("click", showAllCategories);
+hideAllCategoriesButton.addEventListener("click", hideAllCategories);
 
 importForm.addEventListener("submit", handleImport);
 importCategoryInput.addEventListener("input", syncImportCategoryColor);
@@ -134,6 +143,7 @@ async function initialize(): Promise<void> {
 async function refreshCategories(): Promise<void> {
   const data = await apiGet<{ categories: Category[] }>("/api/categories");
   state.categories = data.categories;
+  pruneHiddenCategoryIds();
   renderCategories();
   syncCategoryColor();
   syncImportCategoryColor();
@@ -194,25 +204,48 @@ function renderCategories(): void {
     .map((category) => `<option value="${escapeHtml(category.name)}"></option>`)
     .join("");
 
+  updateFilterSummary();
+
   categoryLegend.innerHTML = state.categories
     .map((category) => {
+      const isVisible = !state.hiddenCategoryIds.has(category.id);
+
       return `
-        <span class="category-pill">
+        <button
+          class="category-pill filter-pill ${isVisible ? "is-active" : "is-muted"}"
+          type="button"
+          data-category-id="${category.id}"
+          aria-pressed="${isVisible}"
+        >
           <span class="swatch" style="background:${category.color}"></span>
           ${escapeHtml(category.name)}
-        </span>
+          <span class="filter-state">${isVisible ? "On" : "Off"}</span>
+        </button>
       `;
     })
     .join("");
+
+  categoryLegend.querySelectorAll("[data-category-id]").forEach((button) => {
+    button.addEventListener("click", () => {
+      toggleCategory(Number((button as HTMLButtonElement).dataset.categoryId));
+    });
+  });
 }
 
 function renderEvents(): void {
+  const visibleEvents = state.events.filter((event) => !state.hiddenCategoryIds.has(event.categoryId));
+
   if (!state.events.length) {
     eventList.innerHTML = `<div class="empty-state">No events in this range.</div>`;
     return;
   }
 
-  eventList.innerHTML = state.events.map(renderEventCard).join("");
+  if (!visibleEvents.length) {
+    eventList.innerHTML = `<div class="empty-state">No events match the selected calendars.</div>`;
+    return;
+  }
+
+  eventList.innerHTML = visibleEvents.map(renderEventCard).join("");
 
   eventList.querySelectorAll("[data-edit-id]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -234,6 +267,85 @@ function renderEvents(): void {
       await deleteEvent(id);
     });
   });
+}
+
+function toggleCategory(categoryId: number): void {
+  if (state.hiddenCategoryIds.has(categoryId)) {
+    state.hiddenCategoryIds.delete(categoryId);
+  } else {
+    state.hiddenCategoryIds.add(categoryId);
+  }
+
+  saveHiddenCategoryIds();
+  renderCategories();
+  renderEvents();
+}
+
+function showAllCategories(): void {
+  state.hiddenCategoryIds.clear();
+  saveHiddenCategoryIds();
+  renderCategories();
+  renderEvents();
+}
+
+function hideAllCategories(): void {
+  state.hiddenCategoryIds = new Set(state.categories.map((category) => category.id));
+  saveHiddenCategoryIds();
+  renderCategories();
+  renderEvents();
+}
+
+function updateFilterSummary(): void {
+  const visibleCount = state.categories.filter((category) => !state.hiddenCategoryIds.has(category.id)).length;
+
+  if (!state.categories.length) {
+    filterSummaryCount.textContent = "None";
+  } else if (visibleCount === state.categories.length) {
+    filterSummaryCount.textContent = "All shown";
+  } else {
+    filterSummaryCount.textContent = `${visibleCount} of ${state.categories.length} shown`;
+  }
+}
+
+function pruneHiddenCategoryIds(): void {
+  const validIds = new Set(state.categories.map((category) => category.id));
+  state.hiddenCategoryIds = new Set(
+    Array.from(state.hiddenCategoryIds).filter((categoryId) => validIds.has(categoryId))
+  );
+  saveHiddenCategoryIds();
+}
+
+function loadHiddenCategoryIds(): Set<number> {
+  try {
+    const storedValue = window.localStorage.getItem(CATEGORY_FILTER_STORAGE_KEY);
+    if (!storedValue) {
+      return new Set();
+    }
+
+    const parsed = JSON.parse(storedValue) as unknown;
+    if (!Array.isArray(parsed)) {
+      return new Set();
+    }
+
+    return new Set(
+      parsed
+        .map((value) => Number(value))
+        .filter((value) => Number.isInteger(value) && value > 0)
+    );
+  } catch {
+    return new Set();
+  }
+}
+
+function saveHiddenCategoryIds(): void {
+  try {
+    window.localStorage.setItem(
+      CATEGORY_FILTER_STORAGE_KEY,
+      JSON.stringify(Array.from(state.hiddenCategoryIds))
+    );
+  } catch {
+    // Filtering still works for the current session if local storage is unavailable.
+  }
 }
 
 function renderEventCard(event: CalendarEvent): string {

@@ -444,7 +444,67 @@ input[type="color"]:disabled {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  padding: 12px 0 18px;
+  padding: 12px 14px 14px;
+}
+
+.calendar-filter {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+  margin: 0 0 18px;
+}
+
+.filter-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 48px;
+  color: #202733;
+  cursor: pointer;
+  font-weight: 900;
+  list-style: none;
+  padding: 0 14px;
+}
+
+.filter-summary::-webkit-details-marker {
+  display: none;
+}
+
+.filter-summary::after {
+  content: "";
+  width: 0;
+  height: 0;
+  border-left: 5px solid transparent;
+  border-right: 5px solid transparent;
+  border-top: 6px solid currentColor;
+}
+
+.calendar-filter[open] .filter-summary {
+  border-bottom: 1px solid var(--line);
+}
+
+.calendar-filter[open] .filter-summary::after {
+  transform: rotate(180deg);
+}
+
+#filter-summary-count {
+  margin-left: auto;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  font-weight: 800;
+}
+
+.filter-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 12px 14px 0;
+}
+
+.filter-actions .button {
+  min-height: 36px;
+  font-size: 0.84rem;
 }
 
 .category-pill {
@@ -459,6 +519,35 @@ input[type="color"]:disabled {
   color: #465367;
   font-size: 0.86rem;
   font-weight: 700;
+}
+
+.filter-pill {
+  appearance: none;
+  cursor: pointer;
+  transition:
+    border-color 140ms ease,
+    color 140ms ease,
+    opacity 140ms ease,
+    background 140ms ease;
+}
+
+.filter-pill.is-active {
+  border-color: #b9c7d6;
+  color: #202733;
+}
+
+.filter-pill.is-muted {
+  background: #f8fafc;
+  color: #8390a2;
+  opacity: 0.62;
+}
+
+.filter-state {
+  margin-left: auto;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  font-weight: 900;
+  text-transform: uppercase;
 }
 
 .swatch {
@@ -640,7 +729,19 @@ input[type="color"]:disabled {
     display: grid;
     grid-template-columns: 1fr;
     gap: 8px;
-    padding: 8px 0 18px;
+  }
+
+  .calendar-filter {
+    margin-bottom: 16px;
+  }
+
+  .filter-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .filter-actions .button {
+    width: 100%;
   }
 
   .category-legend > .category-pill {

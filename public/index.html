@@ -39,7 +39,17 @@
             </label>
           </div>
 
-          <div id="category-legend" class="category-legend" aria-label="Categories"></div>
+          <details id="calendar-filter" class="calendar-filter">
+            <summary class="filter-summary">
+              <span>Calendars</span>
+              <span id="filter-summary-count">All shown</span>
+            </summary>
+            <div class="filter-actions" aria-label="Calendar filter actions">
+              <button class="button button-ghost" id="show-all-categories" type="button">Show all</button>
+              <button class="button button-ghost" id="hide-all-categories" type="button">Hide all</button>
+            </div>
+            <div id="category-legend" class="category-legend" aria-label="Calendars"></div>
+          </details>
           <div id="event-list" class="event-list" aria-live="polite"></div>
         </section>
       </section>
