@@ -39,6 +39,8 @@ if ! id -u www-data >/dev/null 2>&1; then
   useradd --system --gid www-data --home-dir /nonexistent --shell /usr/sbin/nologin www-data
 fi
 
+git config --global --add safe.directory "${APP_DIR}" >/dev/null 2>&1 || true
+
 if [[ -d "${APP_DIR}/.git" ]]; then
   git -C "${APP_DIR}" fetch origin "${BRANCH}"
   git -C "${APP_DIR}" checkout "${BRANCH}"
@@ -55,7 +57,9 @@ cd "${APP_DIR}"
 node --experimental-strip-types scripts/build-client.ts
 
 mkdir -p "${DATA_DIR}"
-chown -R www-data:www-data "${DATA_DIR}" "${APP_DIR}"
+chown -R www-data:www-data "${DATA_DIR}"
+chown -R root:root "${APP_DIR}"
+chmod -R a+rX "${APP_DIR}"
 
 sed \
   -e "s|WorkingDirectory=/opt/countdown-calendar|WorkingDirectory=${APP_DIR}|g" \
