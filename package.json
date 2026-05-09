@@ -1,0 +1,15 @@
+{
+  "name": "countdown-calendar",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "A dependency-free TypeScript countdown calendar backed by SQLite.",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "build": "node --experimental-strip-types scripts/build-client.ts",
+    "start": "node --experimental-strip-types src/server.ts",
+    "dev": "node --experimental-strip-types src/server.ts"
+  }
+}

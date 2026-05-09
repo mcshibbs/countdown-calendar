@@ -1,0 +1,802 @@
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { createServer as createHttpsServer } from "node:https";
+import { DatabaseSync } from "node:sqlite";
+import {
+  createReadStream,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  statSync
+} from "node:fs";
+import { dirname, extname, join, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
+
+type CategoryRow = {
+  id: number;
+  name: string;
+  color: string;
+  builtin: number;
+  created_at: string;
+  updated_at: string;
+};
+
+type EventRow = {
+  id: number;
+  title: string;
+  event_date: string;
+  category_id: number;
+  recurrence: "none" | "annual";
+  source: "manual" | "federal" | "christian";
+  notes: string;
+  created_at: string;
+  updated_at: string;
+  category_name: string;
+  category_color: string;
+  category_builtin: number;
+};
+
+type UpcomingEvent = {
+  id: number;
+  title: string;
+  eventDate: string;
+  occurrenceDate: string;
+  daysUntil: number;
+  categoryId: number;
+  categoryName: string;
+  categoryColor: string;
+  categoryBuiltin: boolean;
+  recurrence: "none" | "annual";
+  source: "manual" | "federal" | "christian";
+  notes: string;
+};
+
+const serverDir = dirname(fileURLToPath(import.meta.url));
+const rootDir = resolve(serverDir, "..");
+const publicDir = resolve(rootDir, "public");
+const defaultDataDir = resolve(rootDir, "data");
+const configuredDbPath = process.env.DB_PATH ?? join(defaultDataDir, "calendar.db");
+const dbPath = configuredDbPath === ":memory:" ? ":memory:" : resolve(configuredDbPath);
+
+if (dbPath !== ":memory:") {
+  mkdirSync(dirname(dbPath), { recursive: true });
+}
+
+const db = new DatabaseSync(dbPath);
+db.exec(`
+  PRAGMA foreign_keys = ON;
+  PRAGMA journal_mode = WAL;
+  PRAGMA synchronous = NORMAL;
+
+  CREATE TABLE IF NOT EXISTS categories (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+    color TEXT NOT NULL,
+    builtin INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    event_date TEXT NOT NULL,
+    category_id INTEGER NOT NULL,
+    recurrence TEXT NOT NULL CHECK (recurrence IN ('none', 'annual')),
+    source TEXT NOT NULL CHECK (source IN ('manual', 'federal', 'christian')),
+    notes TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE RESTRICT
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_events_event_date ON events(event_date);
+  CREATE INDEX IF NOT EXISTS idx_events_category_id ON events(category_id);
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_seeded_holiday_unique
+    ON events(title, event_date, source)
+    WHERE source IN ('federal', 'christian');
+`);
+
+seedBuiltIns();
+
+function nowIso(): string {
+  return new Date().toISOString();
+}
+
+function ensureCategory(name: string, color: string, builtin: boolean): number {
+  const existing = db
+    .prepare("SELECT id, color, builtin FROM categories WHERE name = ?")
+    .get(name) as { id: number; color: string; builtin: number } | undefined;
+
+  if (existing) {
+    if (builtin && (existing.color !== color || existing.builtin !== 1)) {
+      db.prepare("UPDATE categories SET color = ?, builtin = 1, updated_at = ? WHERE id = ?")
+        .run(color, nowIso(), existing.id);
+    }
+    return existing.id;
+  }
+
+  const result = db
+    .prepare(
+      "INSERT INTO categories (name, color, builtin, created_at, updated_at) VALUES (?, ?, ?, ?, ?)"
+    )
+    .run(name, color, builtin ? 1 : 0, nowIso(), nowIso());
+
+  return Number(result.lastInsertRowid);
+}
+
+function seedBuiltIns(): void {
+  const federalCategoryId = ensureCategory("Federal Holidays", "#f97316", true);
+  const christianCategoryId = ensureCategory("Christian Holidays", "#facc15", true);
+  const currentYear = new Date().getFullYear();
+  const startYear = currentYear - 1;
+  const endYear = currentYear + 10;
+
+  const insert = db.prepare(`
+    INSERT OR IGNORE INTO events
+      (title, event_date, category_id, recurrence, source, notes, created_at, updated_at)
+    VALUES (?, ?, ?, 'none', ?, '', ?, ?)
+  `);
+
+  for (let year = startYear; year <= endYear; year += 1) {
+    for (const holiday of federalHolidays(year)) {
+      insert.run(holiday.title, holiday.date, federalCategoryId, "federal", nowIso(), nowIso());
+    }
+
+    for (const holiday of christianHolidays(year)) {
+      insert.run(holiday.title, holiday.date, christianCategoryId, "christian", nowIso(), nowIso());
+    }
+  }
+}
+
+function federalHolidays(year: number): Array<{ title: string; date: string }> {
+  return [
+    observedFixedHoliday("New Year's Day", year, 1, 1),
+    {
+      title: "Martin Luther King Jr. Day",
+      date: formatDate(nthWeekdayOfMonth(year, 1, 1, 3))
+    },
+    {
+      title: "Washington's Birthday",
+      date: formatDate(nthWeekdayOfMonth(year, 2, 1, 3))
+    },
+    {
+      title: "Memorial Day",
+      date: formatDate(lastWeekdayOfMonth(year, 5, 1))
+    },
+    observedFixedHoliday("Juneteenth National Independence Day", year, 6, 19),
+    observedFixedHoliday("Independence Day", year, 7, 4),
+    {
+      title: "Labor Day",
+      date: formatDate(nthWeekdayOfMonth(year, 9, 1, 1))
+    },
+    {
+      title: "Columbus Day",
+      date: formatDate(nthWeekdayOfMonth(year, 10, 1, 2))
+    },
+    observedFixedHoliday("Veterans Day", year, 11, 11),
+    {
+      title: "Thanksgiving Day",
+      date: formatDate(nthWeekdayOfMonth(year, 11, 4, 4))
+    },
+    observedFixedHoliday("Christmas Day", year, 12, 25)
+  ];
+}
+
+function christianHolidays(year: number): Array<{ title: string; date: string }> {
+  const easter = easterSunday(year);
+
+  return [
+    { title: "Epiphany", date: formatDate(utcDate(year, 1, 6)) },
+    { title: "Ash Wednesday", date: formatDate(addDays(easter, -46)) },
+    { title: "Palm Sunday", date: formatDate(addDays(easter, -7)) },
+    { title: "Maundy Thursday", date: formatDate(addDays(easter, -3)) },
+    { title: "Good Friday", date: formatDate(addDays(easter, -2)) },
+    { title: "Easter Sunday", date: formatDate(easter) },
+    { title: "Easter Monday", date: formatDate(addDays(easter, 1)) },
+    { title: "Ascension Day", date: formatDate(addDays(easter, 39)) },
+    { title: "Pentecost", date: formatDate(addDays(easter, 49)) },
+    { title: "Trinity Sunday", date: formatDate(addDays(easter, 56)) },
+    { title: "All Saints' Day", date: formatDate(utcDate(year, 11, 1)) },
+    { title: "Advent Begins", date: formatDate(firstSundayOfAdvent(year)) },
+    { title: "Christmas Day", date: formatDate(utcDate(year, 12, 25)) }
+  ];
+}
+
+function observedFixedHoliday(title: string, year: number, month: number, day: number) {
+  const actual = utcDate(year, month, day);
+  const observed = new Date(actual);
+  const weekday = actual.getUTCDay();
+
+  if (weekday === 6) {
+    observed.setUTCDate(observed.getUTCDate() - 1);
+  } else if (weekday === 0) {
+    observed.setUTCDate(observed.getUTCDate() + 1);
+  }
+
+  const actualDate = formatDate(actual);
+  const observedDate = formatDate(observed);
+  return {
+    title: actualDate === observedDate ? title : `${title} (Observed)`,
+    date: observedDate
+  };
+}
+
+function easterSunday(year: number): Date {
+  const a = year % 19;
+  const b = Math.floor(year / 100);
+  const c = year % 100;
+  const d = Math.floor(b / 4);
+  const e = b % 4;
+  const f = Math.floor((b + 8) / 25);
+  const g = Math.floor((b - f + 1) / 3);
+  const h = (19 * a + b - d - g + 15) % 30;
+  const i = Math.floor(c / 4);
+  const k = c % 4;
+  const l = (32 + 2 * e + 2 * i - h - k) % 7;
+  const m = Math.floor((a + 11 * h + 22 * l) / 451);
+  const month = Math.floor((h + l - 7 * m + 114) / 31);
+  const day = ((h + l - 7 * m + 114) % 31) + 1;
+
+  return utcDate(year, month, day);
+}
+
+function firstSundayOfAdvent(year: number): Date {
+  const start = utcDate(year, 11, 27);
+  const offset = (7 - start.getUTCDay()) % 7;
+  return addDays(start, offset);
+}
+
+function nthWeekdayOfMonth(year: number, month: number, weekday: number, nth: number): Date {
+  const first = utcDate(year, month, 1);
+  const offset = (weekday - first.getUTCDay() + 7) % 7;
+  return utcDate(year, month, 1 + offset + (nth - 1) * 7);
+}
+
+function lastWeekdayOfMonth(year: number, month: number, weekday: number): Date {
+  const last = utcDate(year, month + 1, 0);
+  const offset = (last.getUTCDay() - weekday + 7) % 7;
+  return addDays(last, -offset);
+}
+
+function utcDate(year: number, month: number, day: number): Date {
+  return new Date(Date.UTC(year, month - 1, day));
+}
+
+function addDays(date: Date, days: number): Date {
+  const next = new Date(date);
+  next.setUTCDate(next.getUTCDate() + days);
+  return next;
+}
+
+function parseDateOnly(date: string): Date {
+  const [year, month, day] = date.split("-").map(Number);
+  return utcDate(year, month, day);
+}
+
+function formatDate(date: Date): string {
+  const year = date.getUTCFullYear();
+  const month = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(date.getUTCDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function todayDateOnly(): string {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function daysBetween(startDate: string, endDate: string): number {
+  const start = parseDateOnly(startDate).getTime();
+  const end = parseDateOnly(endDate).getTime();
+  return Math.round((end - start) / 86_400_000);
+}
+
+function isValidDateOnly(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return false;
+  }
+
+  return formatDate(parseDateOnly(value)) === value;
+}
+
+function nextOccurrence(eventDate: string, recurrence: "none" | "annual", today: string): string {
+  if (recurrence === "none") {
+    return eventDate;
+  }
+
+  const [sourceYear, month, day] = eventDate.split("-").map(Number);
+  const currentYear = Number(today.slice(0, 4));
+  let occurrence = annualDate(currentYear, month, day);
+
+  if (occurrence < today) {
+    occurrence = annualDate(currentYear + 1, month, day);
+  }
+
+  if (sourceYear > currentYear && eventDate >= today) {
+    occurrence = eventDate;
+  }
+
+  return occurrence;
+}
+
+function annualDate(year: number, month: number, day: number): string {
+  if (month === 2 && day === 29 && !isLeapYear(year)) {
+    return `${year}-02-28`;
+  }
+
+  return formatDate(utcDate(year, month, day));
+}
+
+function isLeapYear(year: number): boolean {
+  return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+}
+
+function getUpcomingEvents(daysAhead: number): UpcomingEvent[] {
+  const today = todayDateOnly();
+  const rows = db
+    .prepare(
+      `
+      SELECT
+        e.*,
+        c.name AS category_name,
+        c.color AS category_color,
+        c.builtin AS category_builtin
+      FROM events e
+      JOIN categories c ON c.id = e.category_id
+      ORDER BY e.event_date ASC, e.title ASC
+    `
+    )
+    .all() as EventRow[];
+
+  return rows
+    .map((event) => {
+      const occurrenceDate = nextOccurrence(event.event_date, event.recurrence, today);
+      const daysUntil = daysBetween(today, occurrenceDate);
+
+      return {
+        id: event.id,
+        title: event.title,
+        eventDate: event.event_date,
+        occurrenceDate,
+        daysUntil,
+        categoryId: event.category_id,
+        categoryName: event.category_name,
+        categoryColor: event.category_color,
+        categoryBuiltin: event.category_builtin === 1,
+        recurrence: event.recurrence,
+        source: event.source,
+        notes: event.notes,
+      };
+    })
+    .filter((event) => event.daysUntil >= 0 && event.daysUntil <= daysAhead)
+    .sort((a, b) => {
+      if (a.daysUntil !== b.daysUntil) {
+        return a.daysUntil - b.daysUntil;
+      }
+      return a.title.localeCompare(b.title);
+    });
+}
+
+async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
+  const method = req.method ?? "GET";
+
+  if (method === "OPTIONS") {
+    res.writeHead(204);
+    res.end();
+    return;
+  }
+
+  if (method === "GET" && url.pathname === "/api/health") {
+    sendJson(res, 200, {
+      ok: true,
+      today: todayDateOnly(),
+      dbPath
+    });
+    return;
+  }
+
+  if (method === "GET" && url.pathname === "/api/categories") {
+    const categories = db
+      .prepare("SELECT * FROM categories ORDER BY builtin DESC, name ASC")
+      .all() as CategoryRow[];
+    sendJson(res, 200, { categories: categories.map(formatCategory) });
+    return;
+  }
+
+  if (method === "GET" && url.pathname === "/api/events") {
+    const days = clampNumber(Number(url.searchParams.get("days") ?? 730), 30, 3650);
+    sendJson(res, 200, { events: getUpcomingEvents(days) });
+    return;
+  }
+
+  if (method === "POST" && url.pathname === "/api/events") {
+    const body = await readJson(req);
+    const created = createManualEvent(body);
+    sendJson(res, 201, { event: created });
+    return;
+  }
+
+  const eventMatch = url.pathname.match(/^\/api\/events\/(\d+)$/);
+  if (eventMatch && method === "PUT") {
+    const body = await readJson(req);
+    const updated = updateManualEvent(Number(eventMatch[1]), body);
+    sendJson(res, 200, { event: updated });
+    return;
+  }
+
+  if (eventMatch && method === "DELETE") {
+    deleteManualEvent(Number(eventMatch[1]));
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+
+  if (method === "GET" && url.pathname === "/api/export") {
+    const categories = db.prepare("SELECT * FROM categories ORDER BY name ASC").all();
+    const events = db.prepare("SELECT * FROM events ORDER BY event_date ASC, title ASC").all();
+
+    sendJson(
+      res,
+      200,
+      {
+        exportedAt: nowIso(),
+        schemaVersion: 1,
+        categories,
+        events
+      },
+      {
+        "Content-Disposition": `attachment; filename="countdown-calendar-export.json"`
+      }
+    );
+    return;
+  }
+
+  if (method === "GET" && url.pathname === "/api/export.db") {
+    sendDatabaseBackup(res);
+    return;
+  }
+
+  sendJson(res, 404, { error: "Not found" });
+}
+
+function formatCategory(category: CategoryRow) {
+  return {
+    id: category.id,
+    name: category.name,
+    color: category.color,
+    builtin: category.builtin === 1
+  };
+}
+
+function createManualEvent(body: unknown): UpcomingEvent {
+  const input = validateEventInput(body);
+  const categoryId = resolveCategory(input);
+  const result = db
+    .prepare(
+      `
+      INSERT INTO events
+        (title, event_date, category_id, recurrence, source, notes, created_at, updated_at)
+      VALUES (?, ?, ?, ?, 'manual', ?, ?, ?)
+    `
+    )
+    .run(input.title, input.eventDate, categoryId, input.recurrence, input.notes, nowIso(), nowIso());
+
+  const event = getUpcomingEvents(3650).find((item) => item.id === Number(result.lastInsertRowid));
+  if (!event) {
+    throw httpError(500, "Event was saved but could not be loaded.");
+  }
+  return event;
+}
+
+function updateManualEvent(id: number, body: unknown): UpcomingEvent {
+  const existing = db.prepare("SELECT source FROM events WHERE id = ?").get(id) as
+    | { source: string }
+    | undefined;
+
+  if (!existing) {
+    throw httpError(404, "Event not found.");
+  }
+
+  if (existing.source !== "manual") {
+    throw httpError(403, "Built-in holidays cannot be edited.");
+  }
+
+  const input = validateEventInput(body);
+  const categoryId = resolveCategory(input);
+
+  db.prepare(
+    `
+    UPDATE events
+    SET title = ?, event_date = ?, category_id = ?, recurrence = ?, notes = ?, updated_at = ?
+    WHERE id = ?
+  `
+  ).run(input.title, input.eventDate, categoryId, input.recurrence, input.notes, nowIso(), id);
+
+  const event = getUpcomingEvents(3650).find((item) => item.id === id);
+  if (!event) {
+    throw httpError(500, "Event was updated but could not be loaded.");
+  }
+  return event;
+}
+
+function deleteManualEvent(id: number): void {
+  const existing = db.prepare("SELECT source FROM events WHERE id = ?").get(id) as
+    | { source: string }
+    | undefined;
+
+  if (!existing) {
+    throw httpError(404, "Event not found.");
+  }
+
+  if (existing.source !== "manual") {
+    throw httpError(403, "Built-in holidays cannot be deleted.");
+  }
+
+  db.prepare("DELETE FROM events WHERE id = ?").run(id);
+}
+
+function validateEventInput(body: unknown) {
+  if (!body || typeof body !== "object") {
+    throw httpError(400, "Expected a JSON object.");
+  }
+
+  const input = body as Record<string, unknown>;
+  const title = cleanText(input.title, 140);
+  const eventDate = cleanText(input.eventDate, 10);
+  const recurrence = input.recurrence === "annual" ? "annual" : "none";
+  const notes = cleanText(input.notes, 500, true);
+  const categoryId = Number(input.categoryId ?? 0);
+  const categoryName = cleanText(input.categoryName, 80, true);
+  const categoryColor = cleanText(input.categoryColor, 20, true);
+
+  if (!title) {
+    throw httpError(400, "Title is required.");
+  }
+
+  if (!isValidDateOnly(eventDate)) {
+    throw httpError(400, "Date must be in YYYY-MM-DD format.");
+  }
+
+  if (!categoryId && !categoryName) {
+    throw httpError(400, "Choose a category or enter a new one.");
+  }
+
+  if (categoryName && categoryName.length < 2) {
+    throw httpError(400, "Category names need at least two characters.");
+  }
+
+  if (categoryName && categoryColor && !/^#[0-9a-fA-F]{6}$/.test(categoryColor)) {
+    throw httpError(400, "Category color must be a hex color.");
+  }
+
+  return {
+    title,
+    eventDate,
+    recurrence,
+    notes,
+    categoryId,
+    categoryName,
+    categoryColor
+  };
+}
+
+function resolveCategory(input: ReturnType<typeof validateEventInput>): number {
+  if (input.categoryName) {
+    const existing = db
+      .prepare("SELECT id FROM categories WHERE name = ?")
+      .get(input.categoryName) as { id: number } | undefined;
+
+    if (existing) {
+      return existing.id;
+    }
+
+    if (!input.categoryColor) {
+      throw httpError(400, "Pick a color for the new category.");
+    }
+
+    return ensureCategory(input.categoryName, input.categoryColor, false);
+  }
+
+  const existing = db
+    .prepare("SELECT id FROM categories WHERE id = ?")
+    .get(input.categoryId) as { id: number } | undefined;
+
+  if (!existing) {
+    throw httpError(400, "Category does not exist.");
+  }
+
+  return existing.id;
+}
+
+function cleanText(value: unknown, maxLength: number, optional = false): string {
+  if (value === undefined || value === null) {
+    return "";
+  }
+
+  if (typeof value !== "string") {
+    if (optional) {
+      return "";
+    }
+    throw httpError(400, "Expected a text value.");
+  }
+
+  return value.trim().slice(0, maxLength);
+}
+
+function clampNumber(value: number, min: number, max: number): number {
+  if (!Number.isFinite(value)) {
+    return min;
+  }
+  return Math.min(max, Math.max(min, Math.trunc(value)));
+}
+
+function sendDatabaseBackup(res: ServerResponse): void {
+  const backupDir = resolve(dirname(dbPath), "backups");
+  mkdirSync(backupDir, { recursive: true });
+
+  const timestamp = nowIso().replace(/[:.]/g, "-");
+  const backupPath = resolve(backupDir, `calendar-${timestamp}.db`);
+  const sqlPath = backupPath.replace(/'/g, "''");
+
+  db.exec(`VACUUM INTO '${sqlPath}'`);
+  sendFile(res, backupPath, "application/vnd.sqlite3", "countdown-calendar.db");
+}
+
+function readJson(req: IncomingMessage): Promise<unknown> {
+  return new Promise((resolvePromise, reject) => {
+    let body = "";
+
+    req.on("data", (chunk: Buffer) => {
+      body += chunk.toString("utf8");
+      if (body.length > 1_000_000) {
+        reject(httpError(413, "Request body is too large."));
+        req.destroy();
+      }
+    });
+
+    req.on("end", () => {
+      if (!body) {
+        resolvePromise({});
+        return;
+      }
+
+      try {
+        resolvePromise(JSON.parse(body));
+      } catch {
+        reject(httpError(400, "Invalid JSON."));
+      }
+    });
+
+    req.on("error", reject);
+  });
+}
+
+function sendJson(
+  res: ServerResponse,
+  status: number,
+  payload: unknown,
+  headers: Record<string, string> = {}
+): void {
+  res.writeHead(status, {
+    "Content-Type": "application/json; charset=utf-8",
+    "Cache-Control": "no-store",
+    ...headers
+  });
+  res.end(JSON.stringify(payload, null, 2));
+}
+
+function serveStatic(req: IncomingMessage, res: ServerResponse, url: URL): void {
+  const requestPath = url.pathname === "/" ? "/index.html" : url.pathname;
+  const decodedPath = decodeURIComponent(requestPath);
+  const filePath = resolve(publicDir, `.${decodedPath}`);
+
+  if (!filePath.startsWith(publicDir + sep) && filePath !== publicDir) {
+    sendJson(res, 403, { error: "Forbidden" });
+    return;
+  }
+
+  if (!existsSync(filePath)) {
+    sendJson(res, 404, { error: "Not found" });
+    return;
+  }
+
+  const stat = statSync(filePath);
+  if (!stat.isFile()) {
+    sendJson(res, 404, { error: "Not found" });
+    return;
+  }
+
+  sendFile(res, filePath, contentType(filePath));
+}
+
+function sendFile(
+  res: ServerResponse,
+  filePath: string,
+  type: string,
+  downloadName?: string
+): void {
+  const headers: Record<string, string | number> = {
+    "Content-Type": type,
+    "Content-Length": statSync(filePath).size,
+    "Cache-Control": type.includes("html") ? "no-store" : "public, max-age=300"
+  };
+
+  if (downloadName) {
+    headers["Content-Disposition"] = `attachment; filename="${downloadName}"`;
+  }
+
+  res.writeHead(200, headers);
+  createReadStream(filePath).pipe(res);
+}
+
+function contentType(filePath: string): string {
+  const extension = extname(filePath).toLowerCase();
+  const types: Record<string, string> = {
+    ".html": "text/html; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".js": "text/javascript; charset=utf-8",
+    ".json": "application/json; charset=utf-8",
+    ".svg": "image/svg+xml",
+    ".ico": "image/x-icon"
+  };
+
+  return types[extension] ?? "application/octet-stream";
+}
+
+function httpError(status: number, message: string): Error & { status?: number } {
+  const error = new Error(message) as Error & { status?: number };
+  error.status = status;
+  return error;
+}
+
+async function requestHandler(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  try {
+    const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+
+    if (url.pathname.startsWith("/api/")) {
+      await handleApi(req, res, url);
+      return;
+    }
+
+    if (req.method !== "GET" && req.method !== "HEAD") {
+      sendJson(res, 405, { error: "Method not allowed" });
+      return;
+    }
+
+    serveStatic(req, res, url);
+  } catch (error) {
+    const status = typeof (error as { status?: unknown }).status === "number"
+      ? (error as { status: number }).status
+      : 500;
+    const message = error instanceof Error ? error.message : "Unexpected error";
+    sendJson(res, status, { error: message });
+  }
+}
+
+const host = process.env.HOST ?? "0.0.0.0";
+const httpPort = Number(process.env.HTTP_PORT ?? process.env.PORT ?? 80);
+const httpsPort = Number(process.env.HTTPS_PORT ?? 443);
+
+createServer(requestHandler).listen(httpPort, host, () => {
+  console.log(`HTTP listening on http://${host}:${httpPort}`);
+  console.log(`SQLite database: ${dbPath}`);
+});
+
+const certPath = process.env.TLS_CERT_PATH;
+const keyPath = process.env.TLS_KEY_PATH;
+
+if (certPath && keyPath) {
+  createHttpsServer(
+    {
+      cert: readFileSync(certPath),
+      key: readFileSync(keyPath)
+    },
+    requestHandler
+  ).listen(httpsPort, host, () => {
+    console.log(`HTTPS listening on https://${host}:${httpsPort}`);
+  });
+} else {
+  console.log("HTTPS disabled. Set TLS_CERT_PATH and TLS_KEY_PATH to enable port 443.");
+}
