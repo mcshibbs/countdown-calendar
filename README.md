@@ -47,41 +47,34 @@ To move instances, either use the `Download DB` button or stop the service and c
 
 ## Ubuntu VM Setup
 
-Install Node 24:
+Run this on the Ubuntu VM:
 
 ```bash
-curl -fsSL https://deb.nodesource.com/setup_24.x | sudo -E bash -
-sudo apt-get install -y nodejs
+curl -fsSL https://raw.githubusercontent.com/mcshibbs/countdown-calendar/main/scripts/install-ubuntu.sh | sudo bash
 ```
 
-Copy this project to `/opt/countdown-calendar`, then build once:
+The installer:
+
+- Installs Git, curl, certificates, and Node.js 24 when needed.
+- Clones or updates this repo at `/opt/countdown-calendar`.
+- Builds the browser JavaScript.
+- Creates `/var/lib/countdown-calendar`.
+- Installs and starts the systemd service.
+
+Check it:
 
 ```bash
-cd /opt/countdown-calendar
-node --experimental-strip-types scripts/build-client.ts
-```
-
-Create the data directory:
-
-```bash
-sudo mkdir -p /var/lib/countdown-calendar
-sudo chown -R www-data:www-data /var/lib/countdown-calendar
-```
-
-Install the included systemd service:
-
-```bash
-sudo cp countdown-calendar.service /etc/systemd/system/countdown-calendar.service
-```
-
-Start it:
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now countdown-calendar
+systemctl status countdown-calendar
+curl http://localhost/api/health
 ```
 
 HTTP will listen on port 80. HTTPS listens on port 443 when `TLS_CERT_PATH` and `TLS_KEY_PATH` are set.
+
+To use a different repo, branch, app path, or data path:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mcshibbs/countdown-calendar/main/scripts/install-ubuntu.sh | sudo env REPO_URL=https://github.com/mcshibbs/countdown-calendar.git BRANCH=main APP_DIR=/opt/countdown-calendar DATA_DIR=/var/lib/countdown-calendar bash
+```
 
 ## HTTPS
 
