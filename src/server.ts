@@ -50,6 +50,17 @@ type UpcomingEvent = {
   notes: string;
 };
 
+type ImportFormat = "auto" | "ics" | "json" | "csv";
+
+type ImportCandidate = {
+  title: string;
+  eventDate: string;
+  recurrence: "none" | "annual";
+  notes: string;
+  categoryName?: string;
+  categoryColor?: string;
+};
+
 const serverDir = dirname(fileURLToPath(import.meta.url));
 const rootDir = resolve(serverDir, "..");
 const publicDir = resolve(rootDir, "public");
@@ -419,6 +430,13 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
     return;
   }
 
+  if (method === "POST" && url.pathname === "/api/import") {
+    const body = await readJson(req, 5_000_000);
+    const result = importManualEvents(body);
+    sendJson(res, 200, result);
+    return;
+  }
+
   const eventMatch = url.pathname.match(/^\/api\/events\/(\d+)$/);
   if (eventMatch && method === "PUT") {
     const body = await readJson(req);
@@ -537,6 +555,401 @@ function deleteManualEvent(id: number): void {
   db.prepare("DELETE FROM events WHERE id = ?").run(id);
 }
 
+function importManualEvents(body: unknown): { imported: number; skipped: number; errors: string[] } {
+  if (!body || typeof body !== "object") {
+    throw httpError(400, "Expected a JSON object.");
+  }
+
+  const input = body as Record<string, unknown>;
+  const content = cleanText(input.content, 5_000_000);
+  const filename = cleanText(input.filename, 240, true);
+  const categoryName = cleanText(input.categoryName, 80, true) || "Imported Events";
+  const categoryColor = cleanText(input.categoryColor, 20, true) || "#2563eb";
+  const requestedFormat = cleanText(input.format, 20, true) || "auto";
+
+  if (!content) {
+    throw httpError(400, "Import file is empty.");
+  }
+
+  if (!/^#[0-9a-fA-F]{6}$/.test(categoryColor)) {
+    throw httpError(400, "Import category color must be a hex color.");
+  }
+
+  const format = detectImportFormat(requestedFormat, filename, content);
+  const candidates = parseImportContent(format, content);
+
+  if (!candidates.length) {
+    throw httpError(400, "No importable events were found.");
+  }
+
+  let imported = 0;
+  let skipped = 0;
+  const errors: string[] = [];
+
+  const insert = db.prepare(`
+    INSERT INTO events
+      (title, event_date, category_id, recurrence, source, notes, created_at, updated_at)
+    VALUES (?, ?, ?, ?, 'manual', ?, ?, ?)
+  `);
+
+  for (const [index, candidate] of candidates.entries()) {
+    try {
+      const title = candidate.title.trim().slice(0, 140);
+      const eventDate = candidate.eventDate.trim().slice(0, 10);
+      const recurrence = candidate.recurrence === "annual" ? "annual" : "none";
+      const notes = candidate.notes.trim().slice(0, 500);
+      const eventCategoryName = candidate.categoryName?.trim().slice(0, 80) || categoryName;
+      const eventCategoryColor = candidate.categoryColor?.trim().slice(0, 20) || categoryColor;
+
+      if (!title) {
+        throw new Error("missing title");
+      }
+
+      if (!isValidDateOnly(eventDate)) {
+        throw new Error("invalid date");
+      }
+
+      if (!eventCategoryName) {
+        throw new Error("missing category");
+      }
+
+      if (!/^#[0-9a-fA-F]{6}$/.test(eventCategoryColor)) {
+        throw new Error("invalid category color");
+      }
+
+      const categoryId = resolveCategoryByName(eventCategoryName, eventCategoryColor);
+      const duplicate = db
+        .prepare(
+          "SELECT id FROM events WHERE title = ? AND event_date = ? AND category_id = ? AND source = 'manual' LIMIT 1"
+        )
+        .get(title, eventDate, categoryId) as { id: number } | undefined;
+
+      if (duplicate) {
+        skipped += 1;
+        continue;
+      }
+
+      insert.run(title, eventDate, categoryId, recurrence, notes, nowIso(), nowIso());
+      imported += 1;
+    } catch (error) {
+      skipped += 1;
+      if (errors.length < 20) {
+        const message = error instanceof Error ? error.message : "unknown error";
+        errors.push(`Row ${index + 1}: ${message}`);
+      }
+    }
+  }
+
+  return { imported, skipped, errors };
+}
+
+function detectImportFormat(requestedFormat: string, filename: string, content: string): Exclude<ImportFormat, "auto"> {
+  const format = requestedFormat.toLowerCase();
+  if (format === "ics" || format === "json" || format === "csv") {
+    return format;
+  }
+
+  const lowerFilename = filename.toLowerCase();
+  const trimmed = content.trimStart();
+
+  if (lowerFilename.endsWith(".ics") || trimmed.startsWith("BEGIN:VCALENDAR")) {
+    return "ics";
+  }
+
+  if (lowerFilename.endsWith(".json") || trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    return "json";
+  }
+
+  return "csv";
+}
+
+function parseImportContent(format: Exclude<ImportFormat, "auto">, content: string): ImportCandidate[] {
+  if (format === "ics") {
+    return parseIcs(content);
+  }
+
+  if (format === "json") {
+    return parseJsonImport(content);
+  }
+
+  return parseCsvImport(content);
+}
+
+function parseIcs(content: string): ImportCandidate[] {
+  const lines = unfoldIcsLines(content);
+  const events: ImportCandidate[] = [];
+  let current: string[] | null = null;
+
+  for (const line of lines) {
+    const normalized = line.trim().toUpperCase();
+
+    if (normalized === "BEGIN:VEVENT") {
+      current = [];
+      continue;
+    }
+
+    if (normalized === "END:VEVENT") {
+      if (current) {
+        const event = parseIcsEvent(current);
+        if (event) {
+          events.push(event);
+        }
+      }
+      current = null;
+      continue;
+    }
+
+    if (current) {
+      current.push(line);
+    }
+  }
+
+  return events;
+}
+
+function unfoldIcsLines(content: string): string[] {
+  const rawLines = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+  const lines: string[] = [];
+
+  for (const line of rawLines) {
+    if ((line.startsWith(" ") || line.startsWith("\t")) && lines.length) {
+      lines[lines.length - 1] += line.slice(1);
+    } else {
+      lines.push(line);
+    }
+  }
+
+  return lines;
+}
+
+function parseIcsEvent(lines: string[]): ImportCandidate | null {
+  const props = new Map<string, string[]>();
+
+  for (const line of lines) {
+    const colonIndex = line.indexOf(":");
+    if (colonIndex === -1) {
+      continue;
+    }
+
+    const name = line.slice(0, colonIndex).split(";")[0].toUpperCase();
+    const value = unescapeIcsText(line.slice(colonIndex + 1));
+    const existing = props.get(name) ?? [];
+    existing.push(value);
+    props.set(name, existing);
+  }
+
+  const title = firstProp(props, "SUMMARY") || "Imported event";
+  const start = firstProp(props, "DTSTART");
+  const eventDate = start ? parseIcsDate(start) : "";
+
+  if (!eventDate) {
+    return null;
+  }
+
+  const rrule = firstProp(props, "RRULE").toUpperCase();
+  const categories = firstProp(props, "CATEGORIES");
+
+  return {
+    title,
+    eventDate,
+    recurrence: rrule.includes("FREQ=YEARLY") ? "annual" : "none",
+    notes: firstProp(props, "DESCRIPTION"),
+    categoryName: categories ? categories.split(",")[0].trim() : undefined
+  };
+}
+
+function firstProp(props: Map<string, string[]>, name: string): string {
+  return props.get(name)?.[0]?.trim() ?? "";
+}
+
+function parseIcsDate(value: string): string {
+  const match = value.match(/^(\d{4})(\d{2})(\d{2})/);
+  if (!match) {
+    return "";
+  }
+
+  return `${match[1]}-${match[2]}-${match[3]}`;
+}
+
+function unescapeIcsText(value: string): string {
+  return value
+    .replaceAll("\\n", " ")
+    .replaceAll("\\N", " ")
+    .replaceAll("\\,", ",")
+    .replaceAll("\\;", ";")
+    .replaceAll("\\\\", "\\")
+    .trim();
+}
+
+function parseJsonImport(content: string): ImportCandidate[] {
+  let data: unknown;
+
+  try {
+    data = JSON.parse(content) as unknown;
+  } catch {
+    throw httpError(400, "Invalid JSON import file.");
+  }
+
+  const categories = new Map<number, { name: string; color: string }>();
+
+  if (isRecord(data) && Array.isArray(data.categories)) {
+    for (const category of data.categories) {
+      if (!isRecord(category)) {
+        continue;
+      }
+
+      const id = Number(category.id);
+      const name = textFromUnknown(category.name);
+      const color = textFromUnknown(category.color);
+
+      if (Number.isFinite(id) && name) {
+        categories.set(id, { name, color });
+      }
+    }
+  }
+
+  const rawEvents = Array.isArray(data)
+    ? data
+    : isRecord(data) && Array.isArray(data.events)
+      ? data.events
+      : [];
+
+  return rawEvents
+    .filter(isRecord)
+    .filter((event) => {
+      const source = textFromUnknown(event.source);
+      return !source || source === "manual";
+    })
+    .map((event) => {
+      const categoryId = Number(event.categoryId ?? event.category_id);
+      const category = categories.get(categoryId);
+
+      return {
+        title: textFromUnknown(event.title ?? event.summary ?? event.subject),
+        eventDate: textFromUnknown(event.eventDate ?? event.event_date ?? event.date ?? event.start),
+        recurrence: textFromUnknown(event.recurrence).toLowerCase() === "annual" ? "annual" : "none",
+        notes: textFromUnknown(event.notes ?? event.description),
+        categoryName: textFromUnknown(event.categoryName ?? event.category_name) || category?.name,
+        categoryColor: textFromUnknown(event.categoryColor ?? event.category_color) || category?.color
+      };
+    });
+}
+
+function parseCsvImport(content: string): ImportCandidate[] {
+  const rows = parseCsvRows(content);
+  if (!rows.length) {
+    return [];
+  }
+
+  const firstRow = rows[0].map((cell) => cell.trim().toLowerCase());
+  const hasHeader = firstRow.some((cell) =>
+    ["title", "subject", "summary", "date", "eventdate", "event_date", "start", "dtstart"].includes(cell)
+  );
+  const header = hasHeader ? firstRow : ["title", "date", "category", "recurrence", "notes", "color"];
+  const dataRows = hasHeader ? rows.slice(1) : rows;
+
+  return dataRows
+    .filter((row) => row.some((cell) => cell.trim()))
+    .map((row) => {
+      const values = new Map<string, string>();
+      header.forEach((name, index) => {
+        values.set(name, row[index]?.trim() ?? "");
+      });
+
+      return {
+        title: getCsvValue(values, ["title", "subject", "summary"]),
+        eventDate: getCsvValue(values, ["date", "eventdate", "event_date", "start", "dtstart"]),
+        recurrence: getCsvValue(values, ["recurrence", "repeats"]).toLowerCase() === "annual"
+          ? "annual"
+          : "none",
+        notes: getCsvValue(values, ["notes", "description"]),
+        categoryName: getCsvValue(values, ["category", "categoryname", "category_name"]),
+        categoryColor: getCsvValue(values, ["color", "categorycolor", "category_color"])
+      };
+    });
+}
+
+function parseCsvRows(content: string): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let cell = "";
+  let inQuotes = false;
+
+  for (let index = 0; index < content.length; index += 1) {
+    const char = content[index];
+    const next = content[index + 1];
+
+    if (char === '"' && inQuotes && next === '"') {
+      cell += '"';
+      index += 1;
+      continue;
+    }
+
+    if (char === '"') {
+      inQuotes = !inQuotes;
+      continue;
+    }
+
+    if (char === "," && !inQuotes) {
+      row.push(cell);
+      cell = "";
+      continue;
+    }
+
+    if ((char === "\n" || char === "\r") && !inQuotes) {
+      if (char === "\r" && next === "\n") {
+        index += 1;
+      }
+      row.push(cell);
+      rows.push(row);
+      row = [];
+      cell = "";
+      continue;
+    }
+
+    cell += char;
+  }
+
+  row.push(cell);
+  rows.push(row);
+  return rows;
+}
+
+function getCsvValue(values: Map<string, string>, names: string[]): string {
+  for (const name of names) {
+    const value = values.get(name);
+    if (value) {
+      return value.trim();
+    }
+  }
+
+  return "";
+}
+
+function resolveCategoryByName(name: string, color: string): number {
+  const existing = db
+    .prepare("SELECT id FROM categories WHERE name = ?")
+    .get(name) as { id: number } | undefined;
+
+  if (existing) {
+    return existing.id;
+  }
+
+  return ensureCategory(name, color, false);
+}
+
+function textFromUnknown(value: unknown): string {
+  if (value === undefined || value === null) {
+    return "";
+  }
+
+  return String(value).trim();
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
 function validateEventInput(body: unknown) {
   if (!body || typeof body !== "object") {
     throw httpError(400, "Expected a JSON object.");
@@ -644,13 +1057,13 @@ function sendDatabaseBackup(res: ServerResponse): void {
   sendFile(res, backupPath, "application/vnd.sqlite3", "countdown-calendar.db");
 }
 
-function readJson(req: IncomingMessage): Promise<unknown> {
+function readJson(req: IncomingMessage, maxBytes = 1_000_000): Promise<unknown> {
   return new Promise((resolvePromise, reject) => {
     let body = "";
 
     req.on("data", (chunk: Buffer) => {
       body += chunk.toString("utf8");
-      if (body.length > 1_000_000) {
+      if (body.length > maxBytes) {
         reject(httpError(413, "Request body is too large."));
         req.destroy();
       }

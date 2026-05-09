@@ -29,18 +29,32 @@ type EventPayload = {
   notes: string;
 };
 
+type ImportResponse = {
+  imported: number;
+  skipped: number;
+  errors: string[];
+};
+
+type ViewName = "home" | "add" | "settings";
+
 const state: {
   categories: Category[];
   events: CalendarEvent[];
   editingId: number | null;
+  activeView: ViewName;
 } = {
   categories: [],
   events: [],
-  editingId: null
+  editingId: null,
+  activeView: "home"
 };
 
+const navButtons = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-view-target]"));
+const views = Array.from(document.querySelectorAll<HTMLElement>(".view"));
+const eventEditor = document.querySelector("#event-editor") as HTMLDetailsElement;
+
 const form = document.querySelector("#event-form") as HTMLFormElement;
-const formTitle = document.querySelector("#form-title") as HTMLHeadingElement;
+const formTitle = document.querySelector("#form-title") as HTMLSpanElement;
 const submitButton = document.querySelector("#submit-button") as HTMLButtonElement;
 const cancelEditButton = document.querySelector("#cancel-edit") as HTMLButtonElement;
 const formMessage = document.querySelector("#form-message") as HTMLParagraphElement;
@@ -55,6 +69,14 @@ const eventList = document.querySelector("#event-list") as HTMLDivElement;
 const categoryLegend = document.querySelector("#category-legend") as HTMLDivElement;
 const rangeDays = document.querySelector("#range-days") as HTMLSelectElement;
 
+const importForm = document.querySelector("#import-form") as HTMLFormElement;
+const importFile = document.querySelector("#import-file") as HTMLInputElement;
+const importFormat = document.querySelector("#import-format") as HTMLSelectElement;
+const importCategoryInput = document.querySelector("#import-category-name") as HTMLInputElement;
+const importCategoryColor = document.querySelector("#import-category-color") as HTMLInputElement;
+const importColorState = document.querySelector("#import-color-state") as HTMLDivElement;
+const importMessage = document.querySelector("#import-message") as HTMLParagraphElement;
+
 const dateFormatter = new Intl.DateTimeFormat(undefined, {
   weekday: "short",
   month: "short",
@@ -62,10 +84,19 @@ const dateFormatter = new Intl.DateTimeFormat(undefined, {
   year: "numeric"
 });
 
+navButtons.forEach((button) => {
+  button.addEventListener("click", () => {
+    showView((button.dataset.viewTarget ?? "home") as ViewName);
+  });
+});
+
 form.addEventListener("submit", handleSubmit);
 cancelEditButton.addEventListener("click", resetForm);
 categoryInput.addEventListener("input", syncCategoryColor);
 rangeDays.addEventListener("change", refreshEvents);
+
+importForm.addEventListener("submit", handleImport);
+importCategoryInput.addEventListener("input", syncImportCategoryColor);
 
 void initialize();
 
@@ -73,6 +104,7 @@ async function initialize(): Promise<void> {
   setTodayAsDefault();
   await refreshCategories();
   await refreshEvents();
+  showView(viewFromHash());
 }
 
 async function refreshCategories(): Promise<void> {
@@ -80,12 +112,41 @@ async function refreshCategories(): Promise<void> {
   state.categories = data.categories;
   renderCategories();
   syncCategoryColor();
+  syncImportCategoryColor();
 }
 
 async function refreshEvents(): Promise<void> {
   const data = await apiGet<{ events: CalendarEvent[] }>(`/api/events?days=${rangeDays.value}`);
   state.events = data.events;
   renderEvents();
+}
+
+function showView(viewName: ViewName): void {
+  state.activeView = viewName;
+
+  views.forEach((view) => {
+    view.classList.toggle("is-active", view.id === `${viewName}-view`);
+  });
+
+  navButtons.forEach((button) => {
+    button.classList.toggle("is-active", button.dataset.viewTarget === viewName);
+  });
+
+  if (viewName === "add") {
+    eventEditor.open = true;
+  }
+
+  if (window.location.hash !== `#${viewName}`) {
+    window.history.replaceState(null, "", `#${viewName}`);
+  }
+}
+
+function viewFromHash(): ViewName {
+  const hash = window.location.hash.replace("#", "");
+  if (hash === "add" || hash === "settings") {
+    return hash;
+  }
+  return "home";
 }
 
 function renderCategories(): void {
@@ -195,8 +256,48 @@ async function handleSubmit(event: SubmitEvent): Promise<void> {
     resetForm(false);
     await refreshCategories();
     await refreshEvents();
+    showView("home");
   } catch (error) {
     setMessage(error instanceof Error ? error.message : "Something went wrong.", true);
+  }
+}
+
+async function handleImport(event: SubmitEvent): Promise<void> {
+  event.preventDefault();
+  setImportMessage("");
+
+  const file = importFile.files?.[0];
+  if (!file) {
+    setImportMessage("Choose a file to import.", true);
+    return;
+  }
+
+  const existingCategory = findCategory(importCategoryInput.value.trim());
+  if (!existingCategory && !importCategoryColor.value) {
+    setImportMessage("Pick a color for the import category.", true);
+    return;
+  }
+
+  try {
+    const content = await file.text();
+    const result = await apiSend<ImportResponse>("/api/import", "POST", {
+      format: importFormat.value,
+      filename: file.name,
+      content,
+      categoryName: importCategoryInput.value.trim(),
+      categoryColor: importCategoryColor.disabled ? "" : importCategoryColor.value
+    });
+
+    await refreshCategories();
+    await refreshEvents();
+    importForm.reset();
+    importCategoryInput.value = "Imported Events";
+    syncImportCategoryColor();
+
+    const warning = result.errors.length ? ` ${result.errors.length} row warnings.` : "";
+    setImportMessage(`Imported ${result.imported}. Skipped ${result.skipped}.${warning}`);
+  } catch (error) {
+    setImportMessage(error instanceof Error ? error.message : "Import failed.", true);
   }
 }
 
@@ -230,6 +331,7 @@ function startEditing(event: CalendarEvent): void {
   submitButton.textContent = "Save changes";
   cancelEditButton.classList.remove("hidden");
   syncCategoryColor();
+  showView("add");
   titleInput.focus();
 }
 
@@ -267,6 +369,19 @@ function syncCategoryColor(): void {
   } else {
     categoryColor.disabled = false;
     colorState.textContent = "New category";
+  }
+}
+
+function syncImportCategoryColor(): void {
+  const category = findCategory(importCategoryInput.value.trim());
+
+  if (category) {
+    importCategoryColor.value = category.color;
+    importCategoryColor.disabled = true;
+    importColorState.textContent = category.builtin ? "Built-in color" : "Existing category";
+  } else {
+    importCategoryColor.disabled = false;
+    importColorState.textContent = "New category";
   }
 }
 
@@ -414,6 +529,11 @@ async function handleResponse<T>(response: Response): Promise<T> {
 function setMessage(message: string, isError = false): void {
   formMessage.textContent = message;
   formMessage.classList.toggle("error", isError);
+}
+
+function setImportMessage(message: string, isError = false): void {
+  importMessage.textContent = message;
+  importMessage.classList.toggle("error", isError);
 }
 
 function escapeHtml(value: string): string {

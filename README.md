@@ -2,6 +2,8 @@
 
 A dependency-free HTML/CSS/TypeScript countdown calendar with a SQLite database. It seeds U.S. federal holidays in orange, Christian holidays in yellow, and lets you add birthdays, anniversaries, and any other event with custom category colors.
 
+Version 1.1 adds Home/Add Event/Settings navigation, moves exports into Settings, and includes bulk import for `.ics`, JSON, and CSV files.
+
 ## Local Run
 
 Requirements:
@@ -42,6 +44,7 @@ The app also exposes:
 
 - `GET /api/export` for a JSON export of categories and events.
 - `GET /api/export.db` for a consistent SQLite backup made with `VACUUM INTO`.
+- `POST /api/import` for bulk event import from `.ics`, JSON, or CSV content.
 
 To move instances, either use the `Download DB` button or stop the service and copy `calendar.db*` to the new VM or LXC container.
 

@@ -2,8 +2,12 @@
 const state = {
     categories: [],
     events: [],
-    editingId: null
+    editingId: null,
+    activeView: "home"
 };
+const navButtons = Array.from(document.querySelectorAll("[data-view-target]"));
+const views = Array.from(document.querySelectorAll(".view"));
+const eventEditor = document.querySelector("#event-editor");
 const form = document.querySelector("#event-form");
 const formTitle = document.querySelector("#form-title");
 const submitButton = document.querySelector("#submit-button");
@@ -19,32 +23,70 @@ const categoryOptions = document.querySelector("#category-options");
 const eventList = document.querySelector("#event-list");
 const categoryLegend = document.querySelector("#category-legend");
 const rangeDays = document.querySelector("#range-days");
+const importForm = document.querySelector("#import-form");
+const importFile = document.querySelector("#import-file");
+const importFormat = document.querySelector("#import-format");
+const importCategoryInput = document.querySelector("#import-category-name");
+const importCategoryColor = document.querySelector("#import-category-color");
+const importColorState = document.querySelector("#import-color-state");
+const importMessage = document.querySelector("#import-message");
 const dateFormatter = new Intl.DateTimeFormat(undefined, {
     weekday: "short",
     month: "short",
     day: "numeric",
     year: "numeric"
 });
+navButtons.forEach((button)=>{
+    button.addEventListener("click", ()=>{
+        showView(button.dataset.viewTarget ?? "home");
+    });
+});
 form.addEventListener("submit", handleSubmit);
 cancelEditButton.addEventListener("click", resetForm);
 categoryInput.addEventListener("input", syncCategoryColor);
 rangeDays.addEventListener("change", refreshEvents);
+importForm.addEventListener("submit", handleImport);
+importCategoryInput.addEventListener("input", syncImportCategoryColor);
 void initialize();
 async function initialize() {
     setTodayAsDefault();
     await refreshCategories();
     await refreshEvents();
+    showView(viewFromHash());
 }
 async function refreshCategories() {
     const data = await apiGet("/api/categories");
     state.categories = data.categories;
     renderCategories();
     syncCategoryColor();
+    syncImportCategoryColor();
 }
 async function refreshEvents() {
     const data = await apiGet(`/api/events?days=${rangeDays.value}`);
     state.events = data.events;
     renderEvents();
+}
+function showView(viewName) {
+    state.activeView = viewName;
+    views.forEach((view)=>{
+        view.classList.toggle("is-active", view.id === `${viewName}-view`);
+    });
+    navButtons.forEach((button)=>{
+        button.classList.toggle("is-active", button.dataset.viewTarget === viewName);
+    });
+    if (viewName === "add") {
+        eventEditor.open = true;
+    }
+    if (window.location.hash !== `#${viewName}`) {
+        window.history.replaceState(null, "", `#${viewName}`);
+    }
+}
+function viewFromHash() {
+    const hash = window.location.hash.replace("#", "");
+    if (hash === "add" || hash === "settings") {
+        return hash;
+    }
+    return "home";
 }
 function renderCategories() {
     categoryOptions.innerHTML = state.categories.map((category)=>`<option value="${escapeHtml(category.name)}"></option>`).join("");
@@ -133,8 +175,42 @@ async function handleSubmit(event) {
         resetForm(false);
         await refreshCategories();
         await refreshEvents();
+        showView("home");
     } catch (error) {
         setMessage(error instanceof Error ? error.message : "Something went wrong.", true);
+    }
+}
+async function handleImport(event) {
+    event.preventDefault();
+    setImportMessage("");
+    const file = importFile.files?.[0];
+    if (!file) {
+        setImportMessage("Choose a file to import.", true);
+        return;
+    }
+    const existingCategory = findCategory(importCategoryInput.value.trim());
+    if (!existingCategory && !importCategoryColor.value) {
+        setImportMessage("Pick a color for the import category.", true);
+        return;
+    }
+    try {
+        const content = await file.text();
+        const result = await apiSend("/api/import", "POST", {
+            format: importFormat.value,
+            filename: file.name,
+            content,
+            categoryName: importCategoryInput.value.trim(),
+            categoryColor: importCategoryColor.disabled ? "" : importCategoryColor.value
+        });
+        await refreshCategories();
+        await refreshEvents();
+        importForm.reset();
+        importCategoryInput.value = "Imported Events";
+        syncImportCategoryColor();
+        const warning = result.errors.length ? ` ${result.errors.length} row warnings.` : "";
+        setImportMessage(`Imported ${result.imported}. Skipped ${result.skipped}.${warning}`);
+    } catch (error) {
+        setImportMessage(error instanceof Error ? error.message : "Import failed.", true);
     }
 }
 function getPayload() {
@@ -161,6 +237,7 @@ function startEditing(event) {
     submitButton.textContent = "Save changes";
     cancelEditButton.classList.remove("hidden");
     syncCategoryColor();
+    showView("add");
     titleInput.focus();
 }
 function resetForm(clearMessage = true) {
@@ -193,6 +270,17 @@ function syncCategoryColor() {
     } else {
         categoryColor.disabled = false;
         colorState.textContent = "New category";
+    }
+}
+function syncImportCategoryColor() {
+    const category = findCategory(importCategoryInput.value.trim());
+    if (category) {
+        importCategoryColor.value = category.color;
+        importCategoryColor.disabled = true;
+        importColorState.textContent = category.builtin ? "Built-in color" : "Existing category";
+    } else {
+        importCategoryColor.disabled = false;
+        importColorState.textContent = "New category";
     }
 }
 function findCategory(name) {
@@ -315,6 +403,10 @@ async function handleResponse(response) {
 function setMessage(message, isError = false) {
     formMessage.textContent = message;
     formMessage.classList.toggle("error", isError);
+}
+function setImportMessage(message, isError = false) {
+    importMessage.textContent = message;
+    importMessage.classList.toggle("error", isError);
 }
 function escapeHtml(value) {
     return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#039;");
