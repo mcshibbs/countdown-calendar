@@ -5,7 +5,10 @@ const state = {
     events: [],
     editingId: null,
     activeView: "home",
-    hiddenCategoryIds: loadHiddenCategoryIds()
+    hiddenCategoryIds: loadHiddenCategoryIds(),
+    settings: {
+        eventDetailsEnabled: true
+    }
 };
 const navButtons = Array.from(document.querySelectorAll("[data-view-target]"));
 const openEventButtons = Array.from(document.querySelectorAll("[data-open-event-modal]"));
@@ -23,6 +26,9 @@ const dateInput = document.querySelector("#event-date");
 const categoryInput = document.querySelector("#category-name");
 const categoryColor = document.querySelector("#category-color");
 const colorState = document.querySelector("#color-state");
+const detailsEnabledInput = document.querySelector("#details-enabled");
+const eventDetailsFields = document.querySelector("#event-details-fields");
+const detailStartDateInput = document.querySelector("#detail-start-date");
 const notesInput = document.querySelector("#notes");
 const categoryOptions = document.querySelector("#category-options");
 const eventList = document.querySelector("#event-list");
@@ -38,8 +44,15 @@ const importCategoryInput = document.querySelector("#import-category-name");
 const importCategoryColor = document.querySelector("#import-category-color");
 const importColorState = document.querySelector("#import-color-state");
 const importMessage = document.querySelector("#import-message");
+const eventDetailsSetting = document.querySelector("#event-details-setting");
+const settingsMessage = document.querySelector("#settings-message");
 const dateFormatter = new Intl.DateTimeFormat(undefined, {
     weekday: "short",
+    month: "short",
+    day: "numeric",
+    year: "numeric"
+});
+const detailDateFormatter = new Intl.DateTimeFormat(undefined, {
     month: "short",
     day: "numeric",
     year: "numeric"
@@ -66,14 +79,17 @@ eventDialog.addEventListener("click", (event)=>{
     }
 });
 categoryInput.addEventListener("input", syncCategoryColor);
+detailsEnabledInput.addEventListener("change", syncEventDetailsFields);
 rangeDays.addEventListener("change", refreshEvents);
 showAllCategoriesButton.addEventListener("click", showAllCategories);
 hideAllCategoriesButton.addEventListener("click", hideAllCategories);
 importForm.addEventListener("submit", handleImport);
 importCategoryInput.addEventListener("input", syncImportCategoryColor);
+eventDetailsSetting.addEventListener("change", updateEventDetailsSetting);
 void initialize();
 async function initialize() {
     setTodayAsDefault();
+    await refreshSettings();
     await refreshCategories();
     await refreshEvents();
     const initialHash = window.location.hash.replace("#", "");
@@ -82,6 +98,11 @@ async function initialize() {
     if (initialHash === "add") {
         openEventModal();
     }
+}
+async function refreshSettings() {
+    const data = await apiGet("/api/settings");
+    state.settings = data.settings;
+    eventDetailsSetting.checked = state.settings.eventDetailsEnabled;
 }
 async function refreshCategories() {
     const data = await apiGet("/api/categories");
@@ -95,6 +116,22 @@ async function refreshEvents() {
     const data = await apiGet(`/api/events?days=${rangeDays.value}`);
     state.events = data.events;
     renderEvents();
+}
+async function updateEventDetailsSetting() {
+    try {
+        const data = await apiSend("/api/settings", "PUT", {
+            eventDetailsEnabled: eventDetailsSetting.checked
+        });
+        state.settings = data.settings;
+        eventDetailsSetting.checked = state.settings.eventDetailsEnabled;
+        settingsMessage.textContent = "Saved.";
+        settingsMessage.classList.remove("error");
+        renderEvents();
+    } catch (error) {
+        eventDetailsSetting.checked = state.settings.eventDetailsEnabled;
+        settingsMessage.textContent = error instanceof Error ? error.message : "Could not save setting.";
+        settingsMessage.classList.add("error");
+    }
 }
 function showView(viewName) {
     state.activeView = viewName;
@@ -256,6 +293,7 @@ function renderEventCard(event) {
     const canManage = event.source === "manual";
     const recurrenceLabel = event.recurrence === "annual" ? "Yearly" : "Once";
     const sourceLabel = event.source === "manual" ? recurrenceLabel : labelForSource(event.source);
+    const details = renderEventDetails(event);
     const menu = canManage ? `
       <details class="event-actions-menu">
         <summary class="event-menu-button" aria-label="Event actions">
@@ -287,7 +325,32 @@ function renderEventCard(event) {
           <span class="countdown-label">${countdownLabel(event.daysUntil)}</span>
         </div>
       </div>
+      ${details}
     </article>
+  `;
+}
+function renderEventDetails(event) {
+    if (!state.settings.eventDetailsEnabled || !event.detailsEnabled) {
+        return "";
+    }
+    const summary = event.detailSummary.trim();
+    const startDate = event.detailStartDate.trim();
+    if (!summary && !startDate) {
+        return "";
+    }
+    return `
+    <details class="event-detail-panel">
+      <summary>Details</summary>
+      <div class="event-detail-content">
+        ${startDate ? `
+              <div class="detail-row">
+                <span>${escapeHtml(event.detailStartLabel || "Start date")}</span>
+                <strong>${formatDetailDate(startDate)}</strong>
+              </div>
+            ` : ""}
+        ${summary ? `<p>${escapeHtml(summary)}</p>` : ""}
+      </div>
+    </details>
   `;
 }
 function closeEventActionMenu(button) {
@@ -371,7 +434,9 @@ function getPayload() {
         recurrence: recurrenceInput.value === "annual" ? "annual" : "none",
         categoryName: categoryInput.value.trim(),
         categoryColor: categoryColor.disabled ? "" : categoryColor.value,
-        notes: notesInput.value.trim()
+        notes: notesInput.value.trim(),
+        detailsEnabled: detailsEnabledInput.checked,
+        detailStartDate: detailStartDateInput.value
     };
 }
 function startEditing(event) {
@@ -380,13 +445,16 @@ function startEditing(event) {
     dateInput.value = event.eventDate;
     categoryInput.value = event.categoryName;
     categoryColor.value = event.categoryColor;
-    notesInput.value = event.notes ?? "";
+    detailsEnabledInput.checked = event.detailsEnabled;
+    notesInput.value = event.detailSummary || event.notes || "";
+    detailStartDateInput.value = event.detailStartDate ?? "";
     const recurrenceInput = form.querySelector(`input[name='recurrence'][value='${event.recurrence}']`);
     recurrenceInput.checked = true;
     formTitle.textContent = "Edit event";
     submitButton.textContent = "Save changes";
     cancelEditButton.classList.remove("hidden");
     syncCategoryColor();
+    syncEventDetailsFields();
     showView("home");
     openEventModal();
 }
@@ -398,6 +466,7 @@ function resetForm(clearMessage = true) {
     submitButton.textContent = "Add event";
     cancelEditButton.classList.add("hidden");
     syncCategoryColor();
+    syncEventDetailsFields();
     if (clearMessage) {
         setMessage("");
     }
@@ -421,6 +490,9 @@ function syncCategoryColor() {
         categoryColor.disabled = false;
         colorState.textContent = "New category";
     }
+}
+function syncEventDetailsFields() {
+    eventDetailsFields.classList.toggle("hidden", !detailsEnabledInput.checked);
 }
 function syncImportCategoryColor() {
     const category = findCategory(importCategoryInput.value.trim());
@@ -512,6 +584,34 @@ function joinParts(parts) {
 }
 function formatDateForDisplay(dateString) {
     return dateFormatter.format(parseDateOnly(dateString));
+}
+function formatDetailDate(dateString) {
+    const match = dateString.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!match) {
+        return escapeHtml(dateString);
+    }
+    const year = Number(match[1]);
+    if (year < 1900) {
+        return `${monthName(Number(match[2]))} ${Number(match[3])}, ${match[1]}`;
+    }
+    return detailDateFormatter.format(parseDateOnly(dateString));
+}
+function monthName(month) {
+    const names = [
+        "Jan",
+        "Feb",
+        "Mar",
+        "Apr",
+        "May",
+        "Jun",
+        "Jul",
+        "Aug",
+        "Sep",
+        "Oct",
+        "Nov",
+        "Dec"
+    ];
+    return names[month - 1] ?? "Month";
 }
 function toDateOnly(date) {
     const year = date.getFullYear();

@@ -58,6 +58,18 @@
         <div class="settings-grid">
           <section class="settings-panel">
             <div class="panel-heading">
+              <p class="eyebrow">Display</p>
+              <h2>Event details</h2>
+            </div>
+            <label class="toggle-row">
+              <input id="event-details-setting" type="checkbox" checked>
+              <span>Enable expandable holiday and event details</span>
+            </label>
+            <p id="settings-message" class="form-message" role="status"></p>
+          </section>
+
+          <section class="settings-panel">
+            <div class="panel-heading">
               <p class="eyebrow">Data</p>
               <h2>Export</h2>
             </div>
@@ -162,10 +174,21 @@
             <div id="color-state" class="color-state">New category</div>
           </div>
 
-          <label>
-            <span>Notes</span>
-            <textarea id="notes" name="notes" rows="3" maxlength="500"></textarea>
+          <label class="toggle-row">
+            <input id="details-enabled" name="detailsEnabled" type="checkbox">
+            <span>Add expandable summary details</span>
           </label>
+
+          <div id="event-details-fields" class="event-details-fields hidden">
+            <label>
+              <span>Summary</span>
+              <textarea id="notes" name="notes" rows="3" maxlength="500"></textarea>
+            </label>
+            <label>
+              <span>Start date</span>
+              <input id="detail-start-date" name="detailStartDate" type="date">
+            </label>
+          </div>
 
           <button class="button button-primary full-width" id="submit-button" type="submit">Add event</button>
           <p id="form-message" class="form-message" role="status"></p>

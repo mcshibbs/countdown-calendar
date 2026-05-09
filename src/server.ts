@@ -28,6 +28,8 @@ type EventRow = {
   recurrence: "none" | "annual";
   source: "manual" | "federal" | "christian";
   notes: string;
+  details_enabled: number;
+  detail_start_date: string;
   created_at: string;
   updated_at: string;
   category_name: string;
@@ -48,6 +50,10 @@ type UpcomingEvent = {
   recurrence: "none" | "annual";
   source: "manual" | "federal" | "christian";
   notes: string;
+  detailsEnabled: boolean;
+  detailSummary: string;
+  detailStartDate: string;
+  detailStartLabel: string;
 };
 
 type ImportFormat = "auto" | "ics" | "json" | "csv";
@@ -57,8 +63,20 @@ type ImportCandidate = {
   eventDate: string;
   recurrence: "none" | "annual";
   notes: string;
+  detailsEnabled?: boolean;
+  detailStartDate?: string;
   categoryName?: string;
   categoryColor?: string;
+};
+
+type AppSettings = {
+  eventDetailsEnabled: boolean;
+};
+
+type HolidayDetail = {
+  summary: string;
+  startDate: string;
+  startLabel: string;
 };
 
 const serverDir = dirname(fileURLToPath(import.meta.url));
@@ -95,9 +113,17 @@ db.exec(`
     recurrence TEXT NOT NULL CHECK (recurrence IN ('none', 'annual')),
     source TEXT NOT NULL CHECK (source IN ('manual', 'federal', 'christian')),
     notes TEXT NOT NULL DEFAULT '',
+    details_enabled INTEGER NOT NULL DEFAULT 0,
+    detail_start_date TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE RESTRICT
+  );
+
+  CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL
   );
 
   CREATE INDEX IF NOT EXISTS idx_events_event_date ON events(event_date);
@@ -107,10 +133,61 @@ db.exec(`
     WHERE source IN ('federal', 'christian');
 `);
 
+migrateSchema();
+ensureDefaultSetting("eventDetailsEnabled", "true");
 seedBuiltIns();
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+function migrateSchema(): void {
+  ensureColumn("events", "details_enabled", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn("events", "detail_start_date", "TEXT NOT NULL DEFAULT ''");
+}
+
+function ensureColumn(tableName: string, columnName: string, definition: string): void {
+  const columns = db.prepare(`PRAGMA table_info(${tableName})`).all() as Array<{ name: string }>;
+  if (!columns.some((column) => column.name === columnName)) {
+    db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definition}`);
+  }
+}
+
+function ensureDefaultSetting(key: string, value: string): void {
+  db.prepare(
+    "INSERT OR IGNORE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)"
+  ).run(key, value, nowIso());
+}
+
+function getSettings(): AppSettings {
+  const rows = db.prepare("SELECT key, value FROM app_settings").all() as Array<{
+    key: string;
+    value: string;
+  }>;
+  const values = new Map(rows.map((row) => [row.key, row.value]));
+
+  return {
+    eventDetailsEnabled: values.get("eventDetailsEnabled") !== "false"
+  };
+}
+
+function updateSettings(body: unknown): AppSettings {
+  if (!body || typeof body !== "object") {
+    throw httpError(400, "Expected a JSON object.");
+  }
+
+  const input = body as Record<string, unknown>;
+  if (typeof input.eventDetailsEnabled === "boolean") {
+    db.prepare(
+      `
+      INSERT INTO app_settings (key, value, updated_at)
+      VALUES ('eventDetailsEnabled', ?, ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+    `
+    ).run(String(input.eventDetailsEnabled), nowIso());
+  }
+
+  return getSettings();
 }
 
 function ensureCategory(name: string, color: string, builtin: boolean): number {
@@ -366,6 +443,7 @@ function getUpcomingEvents(daysAhead: number): UpcomingEvent[] {
     .map((event) => {
       const occurrenceDate = nextOccurrence(event.event_date, event.recurrence, today);
       const daysUntil = daysBetween(today, occurrenceDate);
+      const details = detailsForEvent(event);
 
       return {
         id: event.id,
@@ -380,6 +458,10 @@ function getUpcomingEvents(daysAhead: number): UpcomingEvent[] {
         recurrence: event.recurrence,
         source: event.source,
         notes: event.notes,
+        detailsEnabled: event.details_enabled === 1 || event.source !== "manual",
+        detailSummary: details.summary,
+        detailStartDate: details.startDate,
+        detailStartLabel: details.startLabel,
       };
     })
     .filter((event) => event.daysUntil >= 0 && event.daysUntil <= daysAhead)
@@ -390,6 +472,157 @@ function getUpcomingEvents(daysAhead: number): UpcomingEvent[] {
       return a.title.localeCompare(b.title);
     });
 }
+
+function detailsForEvent(event: EventRow): HolidayDetail {
+  if (event.source === "manual") {
+    return {
+      summary: event.details_enabled === 1 ? event.notes : "",
+      startDate: event.details_enabled === 1 ? event.detail_start_date : "",
+      startLabel: "Start date"
+    };
+  }
+
+  const key = normalizeHolidayTitle(event.title);
+  const detail = event.source === "federal"
+    ? FEDERAL_HOLIDAY_DETAILS[key]
+    : CHRISTIAN_HOLIDAY_DETAILS[key];
+
+  return detail ?? {
+    summary: "",
+    startDate: "",
+    startLabel: event.source === "federal" ? "Federal holiday since" : "Observed since"
+  };
+}
+
+function normalizeHolidayTitle(title: string): string {
+  return title.replace(/\s+\(Observed\)$/i, "").trim();
+}
+
+const FEDERAL_HOLIDAY_DETAILS: Record<string, HolidayDetail> = {
+  "New Year's Day": {
+    summary: "Marks the first day of the Gregorian calendar year.",
+    startDate: "1870-06-28",
+    startLabel: "Federal holiday since"
+  },
+  "Martin Luther King Jr. Day": {
+    summary: "Honors Martin Luther King Jr. and his leadership in the American civil rights movement.",
+    startDate: "1983-11-02",
+    startLabel: "Federal holiday signed"
+  },
+  "Washington's Birthday": {
+    summary: "Honors George Washington, the first U.S. president; many states and calendars also treat the day as Presidents' Day.",
+    startDate: "1879-01-31",
+    startLabel: "Federal holiday signed"
+  },
+  "Memorial Day": {
+    summary: "Honors U.S. military personnel who died while serving. It grew from Decoration Day after the Civil War.",
+    startDate: "1888-08-01",
+    startLabel: "Federal holiday added"
+  },
+  "Juneteenth National Independence Day": {
+    summary: "Commemorates June 19, 1865, when enslaved people in Galveston, Texas, were informed of emancipation.",
+    startDate: "2021-06-17",
+    startLabel: "Federal holiday signed"
+  },
+  "Independence Day": {
+    summary: "Commemorates the adoption of the Declaration of Independence on July 4, 1776.",
+    startDate: "1870-06-28",
+    startLabel: "Federal holiday since"
+  },
+  "Labor Day": {
+    summary: "Honors workers and the labor movement's contributions to the United States.",
+    startDate: "1894-06-28",
+    startLabel: "Federal holiday signed"
+  },
+  "Columbus Day": {
+    summary: "Recognizes Christopher Columbus's 1492 landing in the Americas; some communities observe Indigenous Peoples' Day instead or alongside it.",
+    startDate: "1968-06-28",
+    startLabel: "Federal holiday signed"
+  },
+  "Veterans Day": {
+    summary: "Honors all U.S. military veterans. It began as Armistice Day, marking the end of World War I.",
+    startDate: "1938-05-13",
+    startLabel: "Federal holiday signed"
+  },
+  "Thanksgiving Day": {
+    summary: "A day of gratitude associated with harvest celebrations and national thanksgiving proclamations.",
+    startDate: "1870-06-28",
+    startLabel: "Federal holiday since"
+  },
+  "Christmas Day": {
+    summary: "Federal observance of Christmas, a Christian celebration of the birth of Jesus Christ.",
+    startDate: "1870-06-28",
+    startLabel: "Federal holiday since"
+  }
+};
+
+const CHRISTIAN_HOLIDAY_DETAILS: Record<string, HolidayDetail> = {
+  "Epiphany": {
+    summary: "Celebrates the manifestation of Christ, often associated in Western Christianity with the visit of the Magi.",
+    startDate: "0300-01-01",
+    startLabel: "Observed since"
+  },
+  "Ash Wednesday": {
+    summary: "Begins Lent, a season of penitence and preparation before Easter.",
+    startDate: "0600-01-01",
+    startLabel: "Developed by"
+  },
+  "Palm Sunday": {
+    summary: "Recalls Jesus' entry into Jerusalem before his Passion.",
+    startDate: "0300-01-01",
+    startLabel: "Observed since"
+  },
+  "Maundy Thursday": {
+    summary: "Commemorates the Last Supper and Jesus' commandment to love one another.",
+    startDate: "0300-01-01",
+    startLabel: "Observed since"
+  },
+  "Good Friday": {
+    summary: "Commemorates the crucifixion of Jesus Christ.",
+    startDate: "0300-01-01",
+    startLabel: "Observed since"
+  },
+  "Easter Sunday": {
+    summary: "Celebrates the resurrection of Jesus Christ and is the central feast of the Christian year.",
+    startDate: "0100-01-01",
+    startLabel: "Observed since"
+  },
+  "Easter Monday": {
+    summary: "Continues the celebration of Easter in many Christian traditions.",
+    startDate: "0300-01-01",
+    startLabel: "Observed since"
+  },
+  "Ascension Day": {
+    summary: "Commemorates Jesus' ascension into heaven, traditionally forty days after Easter.",
+    startDate: "0300-01-01",
+    startLabel: "Observed since"
+  },
+  "Pentecost": {
+    summary: "Celebrates the coming of the Holy Spirit to the apostles and is often called the birthday of the Church.",
+    startDate: "0100-01-01",
+    startLabel: "Observed since"
+  },
+  "Trinity Sunday": {
+    summary: "Celebrates the Christian doctrine of the Trinity: Father, Son, and Holy Spirit.",
+    startDate: "1334-01-01",
+    startLabel: "Western feast established"
+  },
+  "All Saints' Day": {
+    summary: "Honors all saints, known and unknown, in the Christian tradition.",
+    startDate: "0835-01-01",
+    startLabel: "Western date fixed"
+  },
+  "Advent Begins": {
+    summary: "Begins Advent, the season of preparation for Christmas and expectation of Christ's coming.",
+    startDate: "0500-01-01",
+    startLabel: "Season developed by"
+  },
+  "Christmas Day": {
+    summary: "Celebrates the birth of Jesus Christ.",
+    startDate: "0336-12-25",
+    startLabel: "Date attested"
+  }
+};
 
 async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
   const method = req.method ?? "GET";
@@ -420,6 +653,17 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
   if (method === "GET" && url.pathname === "/api/events") {
     const days = clampNumber(Number(url.searchParams.get("days") ?? 730), 30, 3650);
     sendJson(res, 200, { events: getUpcomingEvents(days) });
+    return;
+  }
+
+  if (method === "GET" && url.pathname === "/api/settings") {
+    sendJson(res, 200, { settings: getSettings() });
+    return;
+  }
+
+  if (method === "PUT" && url.pathname === "/api/settings") {
+    const body = await readJson(req);
+    sendJson(res, 200, { settings: updateSettings(body) });
     return;
   }
 
@@ -500,11 +744,21 @@ function createManualEvent(body: unknown): UpcomingEvent {
     .prepare(
       `
       INSERT INTO events
-        (title, event_date, category_id, recurrence, source, notes, created_at, updated_at)
-      VALUES (?, ?, ?, ?, 'manual', ?, ?, ?)
+        (title, event_date, category_id, recurrence, source, notes, details_enabled, detail_start_date, created_at, updated_at)
+      VALUES (?, ?, ?, ?, 'manual', ?, ?, ?, ?, ?)
     `
     )
-    .run(input.title, input.eventDate, categoryId, input.recurrence, input.notes, nowIso(), nowIso());
+    .run(
+      input.title,
+      input.eventDate,
+      categoryId,
+      input.recurrence,
+      input.notes,
+      input.detailsEnabled ? 1 : 0,
+      input.detailStartDate,
+      nowIso(),
+      nowIso()
+    );
 
   const event = getUpcomingEvents(3650).find((item) => item.id === Number(result.lastInsertRowid));
   if (!event) {
@@ -532,10 +786,20 @@ function updateManualEvent(id: number, body: unknown): UpcomingEvent {
   db.prepare(
     `
     UPDATE events
-    SET title = ?, event_date = ?, category_id = ?, recurrence = ?, notes = ?, updated_at = ?
+    SET title = ?, event_date = ?, category_id = ?, recurrence = ?, notes = ?, details_enabled = ?, detail_start_date = ?, updated_at = ?
     WHERE id = ?
   `
-  ).run(input.title, input.eventDate, categoryId, input.recurrence, input.notes, nowIso(), id);
+  ).run(
+    input.title,
+    input.eventDate,
+    categoryId,
+    input.recurrence,
+    input.notes,
+    input.detailsEnabled ? 1 : 0,
+    input.detailStartDate,
+    nowIso(),
+    id
+  );
 
   const event = getUpcomingEvents(3650).find((item) => item.id === id);
   if (!event) {
@@ -593,8 +857,8 @@ function importManualEvents(body: unknown): { imported: number; skipped: number;
 
   const insert = db.prepare(`
     INSERT INTO events
-      (title, event_date, category_id, recurrence, source, notes, created_at, updated_at)
-    VALUES (?, ?, ?, ?, 'manual', ?, ?, ?)
+      (title, event_date, category_id, recurrence, source, notes, details_enabled, detail_start_date, created_at, updated_at)
+    VALUES (?, ?, ?, ?, 'manual', ?, ?, ?, ?, ?)
   `);
 
   for (const [index, candidate] of candidates.entries()) {
@@ -603,6 +867,8 @@ function importManualEvents(body: unknown): { imported: number; skipped: number;
       const eventDate = candidate.eventDate.trim().slice(0, 10);
       const recurrence = candidate.recurrence === "annual" ? "annual" : "none";
       const notes = candidate.notes.trim().slice(0, 500);
+      const detailStartDate = candidate.detailStartDate?.trim().slice(0, 10) ?? "";
+      const detailsEnabled = candidate.detailsEnabled ?? Boolean(notes || detailStartDate);
       const eventCategoryName = candidate.categoryName?.trim().slice(0, 80) || categoryName;
       const eventCategoryColor = candidate.categoryColor?.trim().slice(0, 20) || categoryColor;
 
@@ -612,6 +878,10 @@ function importManualEvents(body: unknown): { imported: number; skipped: number;
 
       if (!isValidDateOnly(eventDate)) {
         throw new Error("invalid date");
+      }
+
+      if (detailStartDate && !isValidDateOnly(detailStartDate)) {
+        throw new Error("invalid detail start date");
       }
 
       if (!eventCategoryName) {
@@ -634,7 +904,17 @@ function importManualEvents(body: unknown): { imported: number; skipped: number;
         continue;
       }
 
-      insert.run(title, eventDate, categoryId, recurrence, notes, nowIso(), nowIso());
+      insert.run(
+        title,
+        eventDate,
+        categoryId,
+        recurrence,
+        notes,
+        detailsEnabled ? 1 : 0,
+        detailStartDate,
+        nowIso(),
+        nowIso()
+      );
       imported += 1;
     } catch (error) {
       skipped += 1;
@@ -834,6 +1114,10 @@ function parseJsonImport(content: string): ImportCandidate[] {
         eventDate: textFromUnknown(event.eventDate ?? event.event_date ?? event.date ?? event.start),
         recurrence: textFromUnknown(event.recurrence).toLowerCase() === "annual" ? "annual" : "none",
         notes: textFromUnknown(event.notes ?? event.description),
+        detailsEnabled: parseOptionalBoolean(event.detailsEnabled ?? event.details_enabled),
+        detailStartDate: textFromUnknown(
+          event.detailStartDate ?? event.detail_start_date ?? event.startDate ?? event.start_date
+        ),
         categoryName: textFromUnknown(event.categoryName ?? event.category_name) || category?.name,
         categoryColor: textFromUnknown(event.categoryColor ?? event.category_color) || category?.color
       };
@@ -868,6 +1152,8 @@ function parseCsvImport(content: string): ImportCandidate[] {
           ? "annual"
           : "none",
         notes: getCsvValue(values, ["notes", "description"]),
+        detailsEnabled: parseOptionalBoolean(getCsvValue(values, ["details_enabled", "detailsenabled", "show_details"])),
+        detailStartDate: getCsvValue(values, ["detail_start_date", "detailstartdate", "start_date", "startdate"]),
         categoryName: getCsvValue(values, ["category", "categoryname", "category_name"]),
         categoryColor: getCsvValue(values, ["color", "categorycolor", "category_color"])
       };
@@ -951,6 +1237,31 @@ function textFromUnknown(value: unknown): string {
   return String(value).trim();
 }
 
+function parseBoolean(value: unknown): boolean {
+  return parseOptionalBoolean(value) ?? false;
+}
+
+function parseOptionalBoolean(value: unknown): boolean | undefined {
+  if (typeof value === "boolean") {
+    return value;
+  }
+
+  const text = textFromUnknown(value).toLowerCase();
+  if (!text) {
+    return undefined;
+  }
+
+  if (["1", "true", "yes", "y", "on"].includes(text)) {
+    return true;
+  }
+
+  if (["0", "false", "no", "n", "off"].includes(text)) {
+    return false;
+  }
+
+  return undefined;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
@@ -965,6 +1276,8 @@ function validateEventInput(body: unknown) {
   const eventDate = cleanText(input.eventDate, 10);
   const recurrence = input.recurrence === "annual" ? "annual" : "none";
   const notes = cleanText(input.notes, 500, true);
+  const detailsEnabled = parseBoolean(input.detailsEnabled);
+  const detailStartDate = cleanText(input.detailStartDate, 10, true);
   const categoryId = Number(input.categoryId ?? 0);
   const categoryName = cleanText(input.categoryName, 80, true);
   const categoryColor = cleanText(input.categoryColor, 20, true);
@@ -989,11 +1302,17 @@ function validateEventInput(body: unknown) {
     throw httpError(400, "Category color must be a hex color.");
   }
 
+  if (detailStartDate && !isValidDateOnly(detailStartDate)) {
+    throw httpError(400, "Detail start date must be in YYYY-MM-DD format.");
+  }
+
   return {
     title,
     eventDate,
     recurrence,
     notes,
+    detailsEnabled,
+    detailStartDate,
     categoryId,
     categoryName,
     categoryColor
@@ -1064,9 +1383,9 @@ function sendDatabaseBackup(res: ServerResponse): void {
 
 function sendCsvTemplate(res: ServerResponse): void {
   const content = [
-    "title,date,category,recurrence,notes,color",
-    "Birthday Example,2026-07-09,Birthdays,annual,Optional note,#14b8a6",
-    "One-time Event Example,2026-12-31,Personal,none,Optional note,#2563eb"
+    "title,date,category,recurrence,notes,color,details_enabled,detail_start_date",
+    "Birthday Example,2026-07-09,Birthdays,annual,Optional summary,#14b8a6,true,1990-07-09",
+    "One-time Event Example,2026-12-31,Personal,none,Optional summary,#2563eb,false,"
   ].join("\n");
 
   res.writeHead(200, {

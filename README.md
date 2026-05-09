@@ -2,7 +2,7 @@
 
 A dependency-free HTML/CSS/TypeScript countdown calendar with a SQLite database. It seeds U.S. federal holidays in orange, Christian holidays in yellow, and lets you add birthdays, anniversaries, and any other event with custom category colors.
 
-Version 1.1 adds Home/Add Event/Settings navigation, moves exports into Settings, and includes bulk import for `.ics`, JSON, and CSV files. Version 1.1.1 folds navigation into a collapsible menu and opens Add Event as a modal over the Home screen. Version 1.1.2 improves iOS/mobile spacing and stacks category labels vertically on narrow screens. Version 1.1.3 adds a collapsible calendar filter with per-category on/off toggles. Version 1.1.4 adds manual-entry action menus and a downloadable CSV import template.
+Version 1.1 adds Home/Add Event/Settings navigation, moves exports into Settings, and includes bulk import for `.ics`, JSON, and CSV files. Version 1.1.1 folds navigation into a collapsible menu and opens Add Event as a modal over the Home screen. Version 1.1.2 improves iOS/mobile spacing and stacks category labels vertically on narrow screens. Version 1.1.3 adds a collapsible calendar filter with per-category on/off toggles. Version 1.1.4 adds manual-entry action menus and a downloadable CSV import template. Version 1.1.5 adds expandable holiday and custom event details with a Settings toggle.
 
 ## Local Run
 
@@ -46,6 +46,9 @@ The app also exposes:
 - `GET /api/export.db` for a consistent SQLite backup made with `VACUUM INTO`.
 - `GET /api/import-template.csv` for a CSV file with the supported import columns.
 - `POST /api/import` for bulk event import from `.ics`, JSON, or CSV content.
+- `GET /api/settings` and `PUT /api/settings` for persisted display settings.
+
+Custom events can include optional expandable details. Use the Add Event checkbox or the CSV/JSON import fields `details_enabled` and `detail_start_date`; the existing `notes`/`description` value becomes the summary.
 
 To move instances, either use the `Download DB` button or stop the service and copy `calendar.db*` to the new VM or LXC container.
 

@@ -18,6 +18,10 @@ type CalendarEvent = {
   recurrence: "none" | "annual";
   source: "manual" | "federal" | "christian";
   notes: string;
+  detailsEnabled: boolean;
+  detailSummary: string;
+  detailStartDate: string;
+  detailStartLabel: string;
 };
 
 type EventPayload = {
@@ -27,6 +31,8 @@ type EventPayload = {
   categoryName: string;
   categoryColor: string;
   notes: string;
+  detailsEnabled: boolean;
+  detailStartDate: string;
 };
 
 type ImportResponse = {
@@ -39,18 +45,24 @@ type ViewName = "home" | "settings";
 
 const CATEGORY_FILTER_STORAGE_KEY = "countdown-calendar-hidden-categories";
 
+type AppSettings = {
+  eventDetailsEnabled: boolean;
+};
+
 const state: {
   categories: Category[];
   events: CalendarEvent[];
   editingId: number | null;
   activeView: ViewName;
   hiddenCategoryIds: Set<number>;
+  settings: AppSettings;
 } = {
   categories: [],
   events: [],
   editingId: null,
   activeView: "home",
-  hiddenCategoryIds: loadHiddenCategoryIds()
+  hiddenCategoryIds: loadHiddenCategoryIds(),
+  settings: { eventDetailsEnabled: true }
 };
 
 const navButtons = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-view-target]"));
@@ -70,6 +82,9 @@ const dateInput = document.querySelector("#event-date") as HTMLInputElement;
 const categoryInput = document.querySelector("#category-name") as HTMLInputElement;
 const categoryColor = document.querySelector("#category-color") as HTMLInputElement;
 const colorState = document.querySelector("#color-state") as HTMLDivElement;
+const detailsEnabledInput = document.querySelector("#details-enabled") as HTMLInputElement;
+const eventDetailsFields = document.querySelector("#event-details-fields") as HTMLDivElement;
+const detailStartDateInput = document.querySelector("#detail-start-date") as HTMLInputElement;
 const notesInput = document.querySelector("#notes") as HTMLTextAreaElement;
 const categoryOptions = document.querySelector("#category-options") as HTMLDataListElement;
 const eventList = document.querySelector("#event-list") as HTMLDivElement;
@@ -86,9 +101,16 @@ const importCategoryInput = document.querySelector("#import-category-name") as H
 const importCategoryColor = document.querySelector("#import-category-color") as HTMLInputElement;
 const importColorState = document.querySelector("#import-color-state") as HTMLDivElement;
 const importMessage = document.querySelector("#import-message") as HTMLParagraphElement;
+const eventDetailsSetting = document.querySelector("#event-details-setting") as HTMLInputElement;
+const settingsMessage = document.querySelector("#settings-message") as HTMLParagraphElement;
 
 const dateFormatter = new Intl.DateTimeFormat(undefined, {
   weekday: "short",
+  month: "short",
+  day: "numeric",
+  year: "numeric"
+});
+const detailDateFormatter = new Intl.DateTimeFormat(undefined, {
   month: "short",
   day: "numeric",
   year: "numeric"
@@ -118,17 +140,20 @@ eventDialog.addEventListener("click", (event) => {
   }
 });
 categoryInput.addEventListener("input", syncCategoryColor);
+detailsEnabledInput.addEventListener("change", syncEventDetailsFields);
 rangeDays.addEventListener("change", refreshEvents);
 showAllCategoriesButton.addEventListener("click", showAllCategories);
 hideAllCategoriesButton.addEventListener("click", hideAllCategories);
 
 importForm.addEventListener("submit", handleImport);
 importCategoryInput.addEventListener("input", syncImportCategoryColor);
+eventDetailsSetting.addEventListener("change", updateEventDetailsSetting);
 
 void initialize();
 
 async function initialize(): Promise<void> {
   setTodayAsDefault();
+  await refreshSettings();
   await refreshCategories();
   await refreshEvents();
   const initialHash = window.location.hash.replace("#", "");
@@ -138,6 +163,12 @@ async function initialize(): Promise<void> {
   if (initialHash === "add") {
     openEventModal();
   }
+}
+
+async function refreshSettings(): Promise<void> {
+  const data = await apiGet<{ settings: AppSettings }>("/api/settings");
+  state.settings = data.settings;
+  eventDetailsSetting.checked = state.settings.eventDetailsEnabled;
 }
 
 async function refreshCategories(): Promise<void> {
@@ -153,6 +184,23 @@ async function refreshEvents(): Promise<void> {
   const data = await apiGet<{ events: CalendarEvent[] }>(`/api/events?days=${rangeDays.value}`);
   state.events = data.events;
   renderEvents();
+}
+
+async function updateEventDetailsSetting(): Promise<void> {
+  try {
+    const data = await apiSend<{ settings: AppSettings }>("/api/settings", "PUT", {
+      eventDetailsEnabled: eventDetailsSetting.checked
+    });
+    state.settings = data.settings;
+    eventDetailsSetting.checked = state.settings.eventDetailsEnabled;
+    settingsMessage.textContent = "Saved.";
+    settingsMessage.classList.remove("error");
+    renderEvents();
+  } catch (error) {
+    eventDetailsSetting.checked = state.settings.eventDetailsEnabled;
+    settingsMessage.textContent = error instanceof Error ? error.message : "Could not save setting.";
+    settingsMessage.classList.add("error");
+  }
 }
 
 function showView(viewName: ViewName): void {
@@ -363,6 +411,7 @@ function renderEventCard(event: CalendarEvent): string {
   const canManage = event.source === "manual";
   const recurrenceLabel = event.recurrence === "annual" ? "Yearly" : "Once";
   const sourceLabel = event.source === "manual" ? recurrenceLabel : labelForSource(event.source);
+  const details = renderEventDetails(event);
   const menu = canManage
     ? `
       <details class="event-actions-menu">
@@ -397,7 +446,39 @@ function renderEventCard(event: CalendarEvent): string {
           <span class="countdown-label">${countdownLabel(event.daysUntil)}</span>
         </div>
       </div>
+      ${details}
     </article>
+  `;
+}
+
+function renderEventDetails(event: CalendarEvent): string {
+  if (!state.settings.eventDetailsEnabled || !event.detailsEnabled) {
+    return "";
+  }
+
+  const summary = event.detailSummary.trim();
+  const startDate = event.detailStartDate.trim();
+  if (!summary && !startDate) {
+    return "";
+  }
+
+  return `
+    <details class="event-detail-panel">
+      <summary>Details</summary>
+      <div class="event-detail-content">
+        ${
+          startDate
+            ? `
+              <div class="detail-row">
+                <span>${escapeHtml(event.detailStartLabel || "Start date")}</span>
+                <strong>${formatDetailDate(startDate)}</strong>
+              </div>
+            `
+            : ""
+        }
+        ${summary ? `<p>${escapeHtml(summary)}</p>` : ""}
+      </div>
+    </details>
   `;
 }
 
@@ -496,7 +577,9 @@ function getPayload(): EventPayload {
     recurrence: recurrenceInput.value === "annual" ? "annual" : "none",
     categoryName: categoryInput.value.trim(),
     categoryColor: categoryColor.disabled ? "" : categoryColor.value,
-    notes: notesInput.value.trim()
+    notes: notesInput.value.trim(),
+    detailsEnabled: detailsEnabledInput.checked,
+    detailStartDate: detailStartDateInput.value
   };
 }
 
@@ -506,7 +589,9 @@ function startEditing(event: CalendarEvent): void {
   dateInput.value = event.eventDate;
   categoryInput.value = event.categoryName;
   categoryColor.value = event.categoryColor;
-  notesInput.value = event.notes ?? "";
+  detailsEnabledInput.checked = event.detailsEnabled;
+  notesInput.value = event.detailSummary || event.notes || "";
+  detailStartDateInput.value = event.detailStartDate ?? "";
 
   const recurrenceInput = form.querySelector(
     `input[name='recurrence'][value='${event.recurrence}']`
@@ -517,6 +602,7 @@ function startEditing(event: CalendarEvent): void {
   submitButton.textContent = "Save changes";
   cancelEditButton.classList.remove("hidden");
   syncCategoryColor();
+  syncEventDetailsFields();
   showView("home");
   openEventModal();
 }
@@ -529,6 +615,7 @@ function resetForm(clearMessage = true): void {
   submitButton.textContent = "Add event";
   cancelEditButton.classList.add("hidden");
   syncCategoryColor();
+  syncEventDetailsFields();
 
   if (clearMessage) {
     setMessage("");
@@ -556,6 +643,10 @@ function syncCategoryColor(): void {
     categoryColor.disabled = false;
     colorState.textContent = "New category";
   }
+}
+
+function syncEventDetailsFields(): void {
+  eventDetailsFields.classList.toggle("hidden", !detailsEnabledInput.checked);
 }
 
 function syncImportCategoryColor(): void {
@@ -668,6 +759,39 @@ function joinParts(parts: string[]): string {
 
 function formatDateForDisplay(dateString: string): string {
   return dateFormatter.format(parseDateOnly(dateString));
+}
+
+function formatDetailDate(dateString: string): string {
+  const match = dateString.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) {
+    return escapeHtml(dateString);
+  }
+
+  const year = Number(match[1]);
+  if (year < 1900) {
+    return `${monthName(Number(match[2]))} ${Number(match[3])}, ${match[1]}`;
+  }
+
+  return detailDateFormatter.format(parseDateOnly(dateString));
+}
+
+function monthName(month: number): string {
+  const names = [
+    "Jan",
+    "Feb",
+    "Mar",
+    "Apr",
+    "May",
+    "Jun",
+    "Jul",
+    "Aug",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Dec"
+  ];
+
+  return names[month - 1] ?? "Month";
 }
 
 function toDateOnly(date: Date): string {
