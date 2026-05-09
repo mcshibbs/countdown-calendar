@@ -20,12 +20,15 @@ type CategoryRow = {
   updated_at: string;
 };
 
+type Recurrence = "none" | "daily" | "weekly" | "monthly" | "annual";
+
 type EventRow = {
   id: number;
   title: string;
   event_date: string;
   category_id: number;
-  recurrence: "none" | "annual";
+  recurrence: Recurrence;
+  recurrence_interval: number;
   source: "manual" | "federal" | "christian";
   notes: string;
   details_enabled: number;
@@ -47,7 +50,9 @@ type UpcomingEvent = {
   categoryName: string;
   categoryColor: string;
   categoryBuiltin: boolean;
-  recurrence: "none" | "annual";
+  recurrence: Recurrence;
+  recurrenceInterval: number;
+  recurrenceLabel: string;
   source: "manual" | "federal" | "christian";
   notes: string;
   detailsEnabled: boolean;
@@ -61,7 +66,8 @@ type ImportFormat = "auto" | "ics" | "json" | "csv";
 type ImportCandidate = {
   title: string;
   eventDate: string;
-  recurrence: "none" | "annual";
+  recurrence: Recurrence;
+  recurrenceInterval?: number;
   notes: string;
   detailsEnabled?: boolean;
   detailStartDate?: string;
@@ -71,6 +77,7 @@ type ImportCandidate = {
 
 type AppSettings = {
   eventDetailsEnabled: boolean;
+  darkModeEnabled: boolean;
 };
 
 type HolidayDetail = {
@@ -110,7 +117,8 @@ db.exec(`
     title TEXT NOT NULL,
     event_date TEXT NOT NULL,
     category_id INTEGER NOT NULL,
-    recurrence TEXT NOT NULL CHECK (recurrence IN ('none', 'annual')),
+    recurrence TEXT NOT NULL CHECK (recurrence IN ('none', 'daily', 'weekly', 'monthly', 'annual')),
+    recurrence_interval INTEGER NOT NULL DEFAULT 1,
     source TEXT NOT NULL CHECK (source IN ('manual', 'federal', 'christian')),
     notes TEXT NOT NULL DEFAULT '',
     details_enabled INTEGER NOT NULL DEFAULT 0,
@@ -126,15 +134,12 @@ db.exec(`
     updated_at TEXT NOT NULL
   );
 
-  CREATE INDEX IF NOT EXISTS idx_events_event_date ON events(event_date);
-  CREATE INDEX IF NOT EXISTS idx_events_category_id ON events(category_id);
-  CREATE UNIQUE INDEX IF NOT EXISTS idx_seeded_holiday_unique
-    ON events(title, event_date, source)
-    WHERE source IN ('federal', 'christian');
 `);
 
 migrateSchema();
 ensureDefaultSetting("eventDetailsEnabled", "true");
+ensureDefaultSetting("darkModeEnabled", "false");
+ensureEventIndexes();
 seedBuiltIns();
 
 function nowIso(): string {
@@ -144,6 +149,8 @@ function nowIso(): string {
 function migrateSchema(): void {
   ensureColumn("events", "details_enabled", "INTEGER NOT NULL DEFAULT 0");
   ensureColumn("events", "detail_start_date", "TEXT NOT NULL DEFAULT ''");
+  ensureColumn("events", "recurrence_interval", "INTEGER NOT NULL DEFAULT 1");
+  migrateEventsRecurrenceConstraint();
 }
 
 function ensureColumn(tableName: string, columnName: string, definition: string): void {
@@ -159,6 +166,70 @@ function ensureDefaultSetting(key: string, value: string): void {
   ).run(key, value, nowIso());
 }
 
+function ensureEventIndexes(): void {
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_events_event_date ON events(event_date);
+    CREATE INDEX IF NOT EXISTS idx_events_category_id ON events(category_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_seeded_holiday_unique
+      ON events(title, event_date, source)
+      WHERE source IN ('federal', 'christian');
+  `);
+}
+
+function migrateEventsRecurrenceConstraint(): void {
+  const row = db
+    .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'events'")
+    .get() as { sql: string } | undefined;
+
+  if (!row?.sql.includes("recurrence IN ('none', 'annual')")) {
+    return;
+  }
+
+  db.exec(`
+    PRAGMA foreign_keys = OFF;
+    BEGIN;
+
+    CREATE TABLE events_new (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      title TEXT NOT NULL,
+      event_date TEXT NOT NULL,
+      category_id INTEGER NOT NULL,
+      recurrence TEXT NOT NULL CHECK (recurrence IN ('none', 'daily', 'weekly', 'monthly', 'annual')),
+      recurrence_interval INTEGER NOT NULL DEFAULT 1,
+      source TEXT NOT NULL CHECK (source IN ('manual', 'federal', 'christian')),
+      notes TEXT NOT NULL DEFAULT '',
+      details_enabled INTEGER NOT NULL DEFAULT 0,
+      detail_start_date TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE RESTRICT
+    );
+
+    INSERT INTO events_new
+      (id, title, event_date, category_id, recurrence, recurrence_interval, source, notes, details_enabled, detail_start_date, created_at, updated_at)
+    SELECT
+      id,
+      title,
+      event_date,
+      category_id,
+      recurrence,
+      COALESCE(recurrence_interval, 1),
+      source,
+      COALESCE(notes, ''),
+      COALESCE(details_enabled, 0),
+      COALESCE(detail_start_date, ''),
+      created_at,
+      updated_at
+    FROM events;
+
+    DROP TABLE events;
+    ALTER TABLE events_new RENAME TO events;
+
+    COMMIT;
+    PRAGMA foreign_keys = ON;
+  `);
+}
+
 function getSettings(): AppSettings {
   const rows = db.prepare("SELECT key, value FROM app_settings").all() as Array<{
     key: string;
@@ -167,7 +238,8 @@ function getSettings(): AppSettings {
   const values = new Map(rows.map((row) => [row.key, row.value]));
 
   return {
-    eventDetailsEnabled: values.get("eventDetailsEnabled") !== "false"
+    eventDetailsEnabled: values.get("eventDetailsEnabled") !== "false",
+    darkModeEnabled: values.get("darkModeEnabled") === "true"
   };
 }
 
@@ -178,16 +250,24 @@ function updateSettings(body: unknown): AppSettings {
 
   const input = body as Record<string, unknown>;
   if (typeof input.eventDetailsEnabled === "boolean") {
-    db.prepare(
-      `
-      INSERT INTO app_settings (key, value, updated_at)
-      VALUES ('eventDetailsEnabled', ?, ?)
-      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
-    `
-    ).run(String(input.eventDetailsEnabled), nowIso());
+    updateBooleanSetting("eventDetailsEnabled", input.eventDetailsEnabled);
+  }
+
+  if (typeof input.darkModeEnabled === "boolean") {
+    updateBooleanSetting("darkModeEnabled", input.darkModeEnabled);
   }
 
   return getSettings();
+}
+
+function updateBooleanSetting(key: keyof AppSettings, value: boolean): void {
+  db.prepare(
+    `
+    INSERT INTO app_settings (key, value, updated_at)
+    VALUES (?, ?, ?)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+  `
+  ).run(key, String(value), nowIso());
 }
 
 function ensureCategory(name: string, color: string, builtin: boolean): number {
@@ -215,6 +295,8 @@ function ensureCategory(name: string, color: string, builtin: boolean): number {
 function seedBuiltIns(): void {
   const federalCategoryId = ensureCategory("Federal Holidays", "#f97316", true);
   const christianCategoryId = ensureCategory("Christian Holidays", "#facc15", true);
+  ensureCategory("Birthday", "#14b8a6", true);
+  ensureCategory("Anniversaries", "#4338ca", true);
   const currentYear = new Date().getFullYear();
   const startYear = currentYear - 1;
   const endYear = currentYear + 10;
@@ -390,36 +472,84 @@ function isValidDateOnly(value: string): boolean {
   return formatDate(parseDateOnly(value)) === value;
 }
 
-function nextOccurrence(eventDate: string, recurrence: "none" | "annual", today: string): string {
+function nextOccurrence(eventDate: string, recurrence: Recurrence, interval: number, today: string): string {
   if (recurrence === "none") {
     return eventDate;
   }
 
-  const [sourceYear, month, day] = eventDate.split("-").map(Number);
-  const currentYear = Number(today.slice(0, 4));
-  let occurrence = annualDate(currentYear, month, day);
-
-  if (occurrence < today) {
-    occurrence = annualDate(currentYear + 1, month, day);
+  if (eventDate >= today) {
+    return eventDate;
   }
 
-  if (sourceYear > currentYear && eventDate >= today) {
-    occurrence = eventDate;
+  const normalizedInterval = normalizeRecurrenceInterval(interval);
+
+  if (recurrence === "daily") {
+    return nextDayIntervalOccurrence(eventDate, today, normalizedInterval);
+  }
+
+  if (recurrence === "weekly") {
+    return nextDayIntervalOccurrence(eventDate, today, normalizedInterval * 7);
+  }
+
+  if (recurrence === "monthly") {
+    return nextMonthIntervalOccurrence(eventDate, today, normalizedInterval);
+  }
+
+  return nextMonthIntervalOccurrence(eventDate, today, normalizedInterval * 12);
+}
+
+function nextDayIntervalOccurrence(eventDate: string, today: string, dayStep: number): string {
+  const elapsedDays = daysBetween(eventDate, today);
+  const cycles = Math.ceil(elapsedDays / dayStep);
+  return formatDate(addDays(parseDateOnly(eventDate), cycles * dayStep));
+}
+
+function nextMonthIntervalOccurrence(eventDate: string, today: string, monthStep: number): string {
+  const [sourceYear, sourceMonth] = eventDate.split("-").map(Number);
+  const [todayYear, todayMonth] = today.split("-").map(Number);
+  const elapsedMonths = Math.max(0, (todayYear - sourceYear) * 12 + (todayMonth - sourceMonth));
+  let cycles = Math.floor(elapsedMonths / monthStep);
+  let occurrence = formatDate(addMonthsClamped(parseDateOnly(eventDate), cycles * monthStep));
+
+  if (occurrence < today) {
+    cycles += 1;
+    occurrence = formatDate(addMonthsClamped(parseDateOnly(eventDate), cycles * monthStep));
   }
 
   return occurrence;
 }
 
-function annualDate(year: number, month: number, day: number): string {
-  if (month === 2 && day === 29 && !isLeapYear(year)) {
-    return `${year}-02-28`;
-  }
-
-  return formatDate(utcDate(year, month, day));
+function addMonthsClamped(date: Date, months: number): Date {
+  const year = date.getUTCFullYear();
+  const month = date.getUTCMonth() + months;
+  const day = date.getUTCDate();
+  const target = new Date(Date.UTC(year, month, 1));
+  const maxDay = new Date(Date.UTC(target.getUTCFullYear(), target.getUTCMonth() + 1, 0)).getUTCDate();
+  target.setUTCDate(Math.min(day, maxDay));
+  return target;
 }
 
-function isLeapYear(year: number): boolean {
-  return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+function normalizeRecurrenceInterval(value: number): number {
+  return clampNumber(value, 1, 999);
+}
+
+function recurrenceLabel(recurrence: Recurrence, interval: number): string {
+  const normalizedInterval = normalizeRecurrenceInterval(interval);
+
+  if (recurrence === "none") {
+    return "Once";
+  }
+
+  const units: Record<Exclude<Recurrence, "none">, string> = {
+    daily: "day",
+    weekly: "week",
+    monthly: "month",
+    annual: "year"
+  };
+  const unit = units[recurrence];
+  return normalizedInterval === 1
+    ? `Every ${unit}`
+    : `Every ${normalizedInterval} ${unit}s`;
 }
 
 function getUpcomingEvents(daysAhead: number): UpcomingEvent[] {
@@ -441,7 +571,8 @@ function getUpcomingEvents(daysAhead: number): UpcomingEvent[] {
 
   return rows
     .map((event) => {
-      const occurrenceDate = nextOccurrence(event.event_date, event.recurrence, today);
+      const recurrenceInterval = normalizeRecurrenceInterval(event.recurrence_interval);
+      const occurrenceDate = nextOccurrence(event.event_date, event.recurrence, recurrenceInterval, today);
       const daysUntil = daysBetween(today, occurrenceDate);
       const details = detailsForEvent(event);
 
@@ -456,6 +587,8 @@ function getUpcomingEvents(daysAhead: number): UpcomingEvent[] {
         categoryColor: event.category_color,
         categoryBuiltin: event.category_builtin === 1,
         recurrence: event.recurrence,
+        recurrenceInterval,
+        recurrenceLabel: recurrenceLabel(event.recurrence, recurrenceInterval),
         source: event.source,
         notes: event.notes,
         detailsEnabled: event.details_enabled === 1 || event.source !== "manual",
@@ -704,7 +837,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
       200,
       {
         exportedAt: nowIso(),
-        schemaVersion: 1,
+        schemaVersion: 2,
         categories,
         events
       },
@@ -744,8 +877,8 @@ function createManualEvent(body: unknown): UpcomingEvent {
     .prepare(
       `
       INSERT INTO events
-        (title, event_date, category_id, recurrence, source, notes, details_enabled, detail_start_date, created_at, updated_at)
-      VALUES (?, ?, ?, ?, 'manual', ?, ?, ?, ?, ?)
+        (title, event_date, category_id, recurrence, recurrence_interval, source, notes, details_enabled, detail_start_date, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, 'manual', ?, ?, ?, ?, ?)
     `
     )
     .run(
@@ -753,6 +886,7 @@ function createManualEvent(body: unknown): UpcomingEvent {
       input.eventDate,
       categoryId,
       input.recurrence,
+      input.recurrenceInterval,
       input.notes,
       input.detailsEnabled ? 1 : 0,
       input.detailStartDate,
@@ -786,7 +920,7 @@ function updateManualEvent(id: number, body: unknown): UpcomingEvent {
   db.prepare(
     `
     UPDATE events
-    SET title = ?, event_date = ?, category_id = ?, recurrence = ?, notes = ?, details_enabled = ?, detail_start_date = ?, updated_at = ?
+    SET title = ?, event_date = ?, category_id = ?, recurrence = ?, recurrence_interval = ?, notes = ?, details_enabled = ?, detail_start_date = ?, updated_at = ?
     WHERE id = ?
   `
   ).run(
@@ -794,6 +928,7 @@ function updateManualEvent(id: number, body: unknown): UpcomingEvent {
     input.eventDate,
     categoryId,
     input.recurrence,
+    input.recurrenceInterval,
     input.notes,
     input.detailsEnabled ? 1 : 0,
     input.detailStartDate,
@@ -857,15 +992,16 @@ function importManualEvents(body: unknown): { imported: number; skipped: number;
 
   const insert = db.prepare(`
     INSERT INTO events
-      (title, event_date, category_id, recurrence, source, notes, details_enabled, detail_start_date, created_at, updated_at)
-    VALUES (?, ?, ?, ?, 'manual', ?, ?, ?, ?, ?)
+      (title, event_date, category_id, recurrence, recurrence_interval, source, notes, details_enabled, detail_start_date, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, 'manual', ?, ?, ?, ?, ?)
   `);
 
   for (const [index, candidate] of candidates.entries()) {
     try {
       const title = candidate.title.trim().slice(0, 140);
       const eventDate = candidate.eventDate.trim().slice(0, 10);
-      const recurrence = candidate.recurrence === "annual" ? "annual" : "none";
+      const recurrence = normalizeRecurrence(candidate.recurrence);
+      const recurrenceInterval = normalizeRecurrenceInterval(candidate.recurrenceInterval ?? 1);
       const notes = candidate.notes.trim().slice(0, 500);
       const detailStartDate = candidate.detailStartDate?.trim().slice(0, 10) ?? "";
       const detailsEnabled = candidate.detailsEnabled ?? Boolean(notes || detailStartDate);
@@ -909,6 +1045,7 @@ function importManualEvents(body: unknown): { imported: number; skipped: number;
         eventDate,
         categoryId,
         recurrence,
+        recurrenceInterval,
         notes,
         detailsEnabled ? 1 : 0,
         detailStartDate,
@@ -1033,11 +1170,13 @@ function parseIcsEvent(lines: string[]): ImportCandidate | null {
 
   const rrule = firstProp(props, "RRULE").toUpperCase();
   const categories = firstProp(props, "CATEGORIES");
+  const recurrence = recurrenceFromRrule(rrule);
 
   return {
     title,
     eventDate,
-    recurrence: rrule.includes("FREQ=YEARLY") ? "annual" : "none",
+    recurrence: recurrence.type,
+    recurrenceInterval: recurrence.interval,
     notes: firstProp(props, "DESCRIPTION"),
     categoryName: categories ? categories.split(",")[0].trim() : undefined
   };
@@ -1054,6 +1193,33 @@ function parseIcsDate(value: string): string {
   }
 
   return `${match[1]}-${match[2]}-${match[3]}`;
+}
+
+function recurrenceFromRrule(rrule: string): { type: Recurrence; interval: number } {
+  if (!rrule) {
+    return { type: "none", interval: 1 };
+  }
+
+  const frequency = rrule.match(/(?:^|;)FREQ=([^;]+)/)?.[1] ?? "";
+  const interval = normalizeRecurrenceInterval(Number(rrule.match(/(?:^|;)INTERVAL=(\d+)/)?.[1] ?? 1));
+
+  if (frequency === "DAILY") {
+    return { type: "daily", interval };
+  }
+
+  if (frequency === "WEEKLY") {
+    return { type: "weekly", interval };
+  }
+
+  if (frequency === "MONTHLY") {
+    return { type: "monthly", interval };
+  }
+
+  if (frequency === "YEARLY") {
+    return { type: "annual", interval };
+  }
+
+  return { type: "none", interval: 1 };
 }
 
 function unescapeIcsText(value: string): string {
@@ -1112,7 +1278,10 @@ function parseJsonImport(content: string): ImportCandidate[] {
       return {
         title: textFromUnknown(event.title ?? event.summary ?? event.subject),
         eventDate: textFromUnknown(event.eventDate ?? event.event_date ?? event.date ?? event.start),
-        recurrence: textFromUnknown(event.recurrence).toLowerCase() === "annual" ? "annual" : "none",
+        recurrence: normalizeRecurrence(textFromUnknown(event.recurrence)),
+        recurrenceInterval: recurrenceIntervalFromUnknown(
+          event.recurrenceInterval ?? event.recurrence_interval ?? event.interval
+        ),
         notes: textFromUnknown(event.notes ?? event.description),
         detailsEnabled: parseOptionalBoolean(event.detailsEnabled ?? event.details_enabled),
         detailStartDate: textFromUnknown(
@@ -1148,9 +1317,10 @@ function parseCsvImport(content: string): ImportCandidate[] {
       return {
         title: getCsvValue(values, ["title", "subject", "summary"]),
         eventDate: getCsvValue(values, ["date", "eventdate", "event_date", "start", "dtstart"]),
-        recurrence: getCsvValue(values, ["recurrence", "repeats"]).toLowerCase() === "annual"
-          ? "annual"
-          : "none",
+        recurrence: normalizeRecurrence(getCsvValue(values, ["recurrence", "repeats"])),
+        recurrenceInterval: recurrenceIntervalFromUnknown(
+          getCsvValue(values, ["recurrence_interval", "recurrenceinterval", "interval", "every"])
+        ),
         notes: getCsvValue(values, ["notes", "description"]),
         detailsEnabled: parseOptionalBoolean(getCsvValue(values, ["details_enabled", "detailsenabled", "show_details"])),
         detailStartDate: getCsvValue(values, ["detail_start_date", "detailstartdate", "start_date", "startdate"]),
@@ -1241,6 +1411,36 @@ function parseBoolean(value: unknown): boolean {
   return parseOptionalBoolean(value) ?? false;
 }
 
+function normalizeRecurrence(value: unknown): Recurrence {
+  const text = textFromUnknown(value).toLowerCase();
+  if (text === "daily" || text === "day") {
+    return "daily";
+  }
+
+  if (text === "weekly" || text === "week") {
+    return "weekly";
+  }
+
+  if (text === "monthly" || text === "month") {
+    return "monthly";
+  }
+
+  if (text === "annual" || text === "yearly" || text === "year") {
+    return "annual";
+  }
+
+  return "none";
+}
+
+function recurrenceIntervalFromUnknown(value: unknown): number | undefined {
+  if (value === undefined || value === null || value === "") {
+    return undefined;
+  }
+
+  const interval = Number(value);
+  return normalizeRecurrenceInterval(interval);
+}
+
 function parseOptionalBoolean(value: unknown): boolean | undefined {
   if (typeof value === "boolean") {
     return value;
@@ -1274,7 +1474,10 @@ function validateEventInput(body: unknown) {
   const input = body as Record<string, unknown>;
   const title = cleanText(input.title, 140);
   const eventDate = cleanText(input.eventDate, 10);
-  const recurrence = input.recurrence === "annual" ? "annual" : "none";
+  const recurrence = normalizeRecurrence(input.recurrence);
+  const recurrenceInterval = recurrence === "none"
+    ? 1
+    : recurrenceIntervalFromUnknown(input.recurrenceInterval) ?? 1;
   const notes = cleanText(input.notes, 500, true);
   const detailsEnabled = parseBoolean(input.detailsEnabled);
   const detailStartDate = cleanText(input.detailStartDate, 10, true);
@@ -1310,6 +1513,7 @@ function validateEventInput(body: unknown) {
     title,
     eventDate,
     recurrence,
+    recurrenceInterval,
     notes,
     detailsEnabled,
     detailStartDate,
@@ -1383,9 +1587,9 @@ function sendDatabaseBackup(res: ServerResponse): void {
 
 function sendCsvTemplate(res: ServerResponse): void {
   const content = [
-    "title,date,category,recurrence,notes,color,details_enabled,detail_start_date",
-    "Birthday Example,2026-07-09,Birthdays,annual,Optional summary,#14b8a6,true,1990-07-09",
-    "One-time Event Example,2026-12-31,Personal,none,Optional summary,#2563eb,false,"
+    "title,date,category,recurrence,recurrence_interval,notes,color,details_enabled,detail_start_date",
+    "Birthday Example,2026-07-09,Birthday,annual,1,Optional summary,#14b8a6,true,1990-07-09",
+    "Every Other Week Example,2026-12-31,Personal,weekly,2,Optional summary,#2563eb,false,"
   ].join("\n");
 
   res.writeHead(200, {

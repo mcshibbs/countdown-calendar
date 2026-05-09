@@ -5,6 +5,9 @@ type Category = {
   builtin: boolean;
 };
 
+type Recurrence = "none" | "daily" | "weekly" | "monthly" | "annual";
+type DisplayMode = "list" | "month" | "week" | "day";
+
 type CalendarEvent = {
   id: number;
   title: string;
@@ -15,7 +18,9 @@ type CalendarEvent = {
   categoryName: string;
   categoryColor: string;
   categoryBuiltin: boolean;
-  recurrence: "none" | "annual";
+  recurrence: Recurrence;
+  recurrenceInterval: number;
+  recurrenceLabel: string;
   source: "manual" | "federal" | "christian";
   notes: string;
   detailsEnabled: boolean;
@@ -27,7 +32,8 @@ type CalendarEvent = {
 type EventPayload = {
   title: string;
   eventDate: string;
-  recurrence: "none" | "annual";
+  recurrence: Recurrence;
+  recurrenceInterval: number;
   categoryName: string;
   categoryColor: string;
   notes: string;
@@ -47,6 +53,7 @@ const CATEGORY_FILTER_STORAGE_KEY = "countdown-calendar-hidden-categories";
 
 type AppSettings = {
   eventDetailsEnabled: boolean;
+  darkModeEnabled: boolean;
 };
 
 const state: {
@@ -56,13 +63,17 @@ const state: {
   activeView: ViewName;
   hiddenCategoryIds: Set<number>;
   settings: AppSettings;
+  displayMode: DisplayMode;
+  calendarCursor: Date;
 } = {
   categories: [],
   events: [],
   editingId: null,
   activeView: "home",
   hiddenCategoryIds: loadHiddenCategoryIds(),
-  settings: { eventDetailsEnabled: true }
+  settings: { eventDetailsEnabled: true, darkModeEnabled: false },
+  displayMode: "list",
+  calendarCursor: startOfToday()
 };
 
 const navButtons = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-view-target]"));
@@ -79,6 +90,10 @@ const cancelEditButton = document.querySelector("#cancel-edit") as HTMLButtonEle
 const formMessage = document.querySelector("#form-message") as HTMLParagraphElement;
 const titleInput = document.querySelector("#title") as HTMLInputElement;
 const dateInput = document.querySelector("#event-date") as HTMLInputElement;
+const recurrenceTypeInput = document.querySelector("#recurrence-type") as HTMLSelectElement;
+const recurrenceIntervalRow = document.querySelector("#recurrence-interval-row") as HTMLDivElement;
+const recurrenceIntervalInput = document.querySelector("#recurrence-interval") as HTMLInputElement;
+const recurrenceUnitLabel = document.querySelector("#recurrence-unit-label") as HTMLDivElement;
 const categoryInput = document.querySelector("#category-name") as HTMLInputElement;
 const categoryColor = document.querySelector("#category-color") as HTMLInputElement;
 const colorState = document.querySelector("#color-state") as HTMLDivElement;
@@ -93,6 +108,13 @@ const filterSummaryCount = document.querySelector("#filter-summary-count") as HT
 const showAllCategoriesButton = document.querySelector("#show-all-categories") as HTMLButtonElement;
 const hideAllCategoriesButton = document.querySelector("#hide-all-categories") as HTMLButtonElement;
 const rangeDays = document.querySelector("#range-days") as HTMLSelectElement;
+const displayModeInputs = Array.from(document.querySelectorAll<HTMLInputElement>("input[name='displayMode']"));
+const calendarToolbar = document.querySelector("#calendar-toolbar") as HTMLDivElement;
+const calendarPeriodLabel = document.querySelector("#calendar-period-label") as HTMLElement;
+const calendarPrevButton = document.querySelector("#calendar-prev") as HTMLButtonElement;
+const calendarTodayButton = document.querySelector("#calendar-today") as HTMLButtonElement;
+const calendarNextButton = document.querySelector("#calendar-next") as HTMLButtonElement;
+const calendarBoard = document.querySelector("#calendar-board") as HTMLDivElement;
 
 const importForm = document.querySelector("#import-form") as HTMLFormElement;
 const importFile = document.querySelector("#import-file") as HTMLInputElement;
@@ -102,6 +124,7 @@ const importCategoryColor = document.querySelector("#import-category-color") as 
 const importColorState = document.querySelector("#import-color-state") as HTMLDivElement;
 const importMessage = document.querySelector("#import-message") as HTMLParagraphElement;
 const eventDetailsSetting = document.querySelector("#event-details-setting") as HTMLInputElement;
+const darkModeSetting = document.querySelector("#dark-mode-setting") as HTMLInputElement;
 const settingsMessage = document.querySelector("#settings-message") as HTMLParagraphElement;
 
 const dateFormatter = new Intl.DateTimeFormat(undefined, {
@@ -114,6 +137,17 @@ const detailDateFormatter = new Intl.DateTimeFormat(undefined, {
   month: "short",
   day: "numeric",
   year: "numeric"
+});
+const monthYearFormatter = new Intl.DateTimeFormat(undefined, {
+  month: "long",
+  year: "numeric"
+});
+const shortDateFormatter = new Intl.DateTimeFormat(undefined, {
+  month: "short",
+  day: "numeric"
+});
+const weekdayFormatter = new Intl.DateTimeFormat(undefined, {
+  weekday: "short"
 });
 
 navButtons.forEach((button) => {
@@ -141,18 +175,36 @@ eventDialog.addEventListener("click", (event) => {
 });
 categoryInput.addEventListener("input", syncCategoryColor);
 detailsEnabledInput.addEventListener("change", syncEventDetailsFields);
+recurrenceTypeInput.addEventListener("change", syncRecurrenceFields);
+recurrenceIntervalInput.addEventListener("input", syncRecurrenceFields);
 rangeDays.addEventListener("change", refreshEvents);
 showAllCategoriesButton.addEventListener("click", showAllCategories);
 hideAllCategoriesButton.addEventListener("click", hideAllCategories);
+displayModeInputs.forEach((input) => {
+  input.addEventListener("change", () => {
+    if (input.checked) {
+      state.displayMode = input.value as DisplayMode;
+      renderCurrentView();
+    }
+  });
+});
+calendarPrevButton.addEventListener("click", () => moveCalendarCursor(-1));
+calendarTodayButton.addEventListener("click", () => {
+  state.calendarCursor = startOfToday();
+  renderCurrentView();
+});
+calendarNextButton.addEventListener("click", () => moveCalendarCursor(1));
 
 importForm.addEventListener("submit", handleImport);
 importCategoryInput.addEventListener("input", syncImportCategoryColor);
 eventDetailsSetting.addEventListener("change", updateEventDetailsSetting);
+darkModeSetting.addEventListener("change", updateEventDetailsSetting);
 
 void initialize();
 
 async function initialize(): Promise<void> {
   setTodayAsDefault();
+  syncRecurrenceFields();
   await refreshSettings();
   await refreshCategories();
   await refreshEvents();
@@ -169,6 +221,8 @@ async function refreshSettings(): Promise<void> {
   const data = await apiGet<{ settings: AppSettings }>("/api/settings");
   state.settings = data.settings;
   eventDetailsSetting.checked = state.settings.eventDetailsEnabled;
+  darkModeSetting.checked = state.settings.darkModeEnabled;
+  applyTheme();
 }
 
 async function refreshCategories(): Promise<void> {
@@ -183,24 +237,32 @@ async function refreshCategories(): Promise<void> {
 async function refreshEvents(): Promise<void> {
   const data = await apiGet<{ events: CalendarEvent[] }>(`/api/events?days=${rangeDays.value}`);
   state.events = data.events;
-  renderEvents();
+  renderCurrentView();
 }
 
 async function updateEventDetailsSetting(): Promise<void> {
   try {
     const data = await apiSend<{ settings: AppSettings }>("/api/settings", "PUT", {
-      eventDetailsEnabled: eventDetailsSetting.checked
+      eventDetailsEnabled: eventDetailsSetting.checked,
+      darkModeEnabled: darkModeSetting.checked
     });
     state.settings = data.settings;
     eventDetailsSetting.checked = state.settings.eventDetailsEnabled;
+    darkModeSetting.checked = state.settings.darkModeEnabled;
+    applyTheme();
     settingsMessage.textContent = "Saved.";
     settingsMessage.classList.remove("error");
-    renderEvents();
+    renderCurrentView();
   } catch (error) {
     eventDetailsSetting.checked = state.settings.eventDetailsEnabled;
+    darkModeSetting.checked = state.settings.darkModeEnabled;
     settingsMessage.textContent = error instanceof Error ? error.message : "Could not save setting.";
     settingsMessage.classList.add("error");
   }
+}
+
+function applyTheme(): void {
+  document.documentElement.dataset.theme = state.settings.darkModeEnabled ? "dark" : "light";
 }
 
 function showView(viewName: ViewName): void {
@@ -282,6 +344,9 @@ function renderCategories(): void {
 
 function renderEvents(): void {
   const visibleEvents = state.events.filter((event) => !state.hiddenCategoryIds.has(event.categoryId));
+  calendarToolbar.classList.add("hidden");
+  calendarBoard.classList.add("hidden");
+  eventList.classList.remove("hidden");
 
   if (!state.events.length) {
     eventList.innerHTML = `<div class="empty-state">No events in this range.</div>`;
@@ -294,8 +359,11 @@ function renderEvents(): void {
   }
 
   eventList.innerHTML = visibleEvents.map(renderEventCard).join("");
+  wireEventActions(eventList);
+}
 
-  eventList.querySelectorAll("[data-edit-id]").forEach((button) => {
+function wireEventActions(root: ParentNode): void {
+  root.querySelectorAll("[data-edit-id]").forEach((button) => {
     button.addEventListener("click", () => {
       closeEventActionMenu(button as HTMLButtonElement);
       const id = Number((button as HTMLButtonElement).dataset.editId);
@@ -306,7 +374,7 @@ function renderEvents(): void {
     });
   });
 
-  eventList.querySelectorAll("[data-delete-id]").forEach((button) => {
+  root.querySelectorAll("[data-delete-id]").forEach((button) => {
     button.addEventListener("click", async () => {
       closeEventActionMenu(button as HTMLButtonElement);
       const id = Number((button as HTMLButtonElement).dataset.deleteId);
@@ -318,7 +386,7 @@ function renderEvents(): void {
     });
   });
 
-  eventList.querySelectorAll(".event-actions-menu").forEach((menu) => {
+  root.querySelectorAll(".event-actions-menu").forEach((menu) => {
     menu.addEventListener("toggle", () => {
       const eventMenu = menu as HTMLDetailsElement;
       if (eventMenu.open) {
@@ -326,6 +394,181 @@ function renderEvents(): void {
       }
     });
   });
+}
+
+function renderCurrentView(): void {
+  if (state.displayMode === "list") {
+    renderEvents();
+    return;
+  }
+
+  renderCalendarView();
+}
+
+function renderCalendarView(): void {
+  const visibleEvents = state.events.filter((event) => !state.hiddenCategoryIds.has(event.categoryId));
+  const eventsByDate = groupEventsByDate(visibleEvents);
+
+  calendarToolbar.classList.remove("hidden");
+  calendarBoard.classList.remove("hidden");
+  eventList.classList.add("hidden");
+  calendarPeriodLabel.textContent = calendarPeriodText();
+
+  if (state.displayMode === "month") {
+    calendarBoard.innerHTML = renderMonthView(eventsByDate);
+  } else if (state.displayMode === "week") {
+    calendarBoard.innerHTML = renderWeekView(eventsByDate);
+  } else {
+    calendarBoard.innerHTML = renderDayView(eventsByDate);
+  }
+
+  calendarBoard.querySelectorAll("[data-calendar-date]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const dateValue = (button as HTMLButtonElement).dataset.calendarDate;
+      if (!dateValue) {
+        return;
+      }
+
+      state.calendarCursor = parseDateOnly(dateValue);
+      state.displayMode = "day";
+      syncDisplayModeControls();
+      renderCurrentView();
+    });
+  });
+
+  wireEventActions(calendarBoard);
+}
+
+function renderMonthView(eventsByDate: Map<string, CalendarEvent[]>): string {
+  const cursor = state.calendarCursor;
+  const firstOfMonth = new Date(cursor.getFullYear(), cursor.getMonth(), 1);
+  const lastOfMonth = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 0);
+  const start = startOfWeek(firstOfMonth);
+  const end = endOfWeek(lastOfMonth);
+  const days = datesBetween(start, end);
+
+  return `
+    <div class="calendar-weekdays">
+      ${weekdayLabels().map((day) => `<span>${day}</span>`).join("")}
+    </div>
+    <div class="calendar-grid calendar-grid-month">
+      ${days.map((date) => renderCalendarDayButton(date, eventsByDate, date.getMonth() === cursor.getMonth())).join("")}
+    </div>
+  `;
+}
+
+function renderWeekView(eventsByDate: Map<string, CalendarEvent[]>): string {
+  const start = startOfWeek(state.calendarCursor);
+  const days = datesBetween(start, endOfWeek(state.calendarCursor));
+
+  return `
+    <div class="calendar-grid calendar-grid-week">
+      ${days.map((date) => renderCalendarDayButton(date, eventsByDate, true)).join("")}
+    </div>
+  `;
+}
+
+function renderDayView(eventsByDate: Map<string, CalendarEvent[]>): string {
+  const dateKey = toDateOnly(state.calendarCursor);
+  const events = eventsByDate.get(dateKey) ?? [];
+  const cards = events.length
+    ? events.map(renderEventCard).join("")
+    : `<div class="empty-state">No events on this day.</div>`;
+
+  return `
+    <section class="calendar-day-agenda">
+      <div class="panel-heading">
+        <p class="eyebrow">${weekdayFormatter.format(state.calendarCursor)}</p>
+        <h2>${formatDateForDisplay(dateKey)}</h2>
+      </div>
+      <div class="event-list">${cards}</div>
+    </section>
+  `;
+}
+
+function renderCalendarDayButton(
+  date: Date,
+  eventsByDate: Map<string, CalendarEvent[]>,
+  inPrimaryPeriod: boolean
+): string {
+  const dateKey = toDateOnly(date);
+  const events = eventsByDate.get(dateKey) ?? [];
+  const classes = [
+    "calendar-day",
+    inPrimaryPeriod ? "" : "is-outside",
+    sameDate(date, startOfToday()) ? "is-today" : "",
+    events.length ? "has-events" : ""
+  ].filter(Boolean).join(" ");
+
+  return `
+    <button class="${classes}" type="button" data-calendar-date="${dateKey}">
+      <span class="calendar-day-heading">
+        <span class="calendar-weekday">${weekdayFormatter.format(date)}</span>
+        <span class="calendar-day-number">${date.getDate()}</span>
+      </span>
+      <span class="calendar-markers" aria-label="${events.length} events">
+        ${events.slice(0, 5).map((event) => `<span class="calendar-dot" style="background:${event.categoryColor}"></span>`).join("")}
+      </span>
+      <span class="calendar-items">
+        ${events.slice(0, 3).map((event) => `
+          <span class="calendar-item">
+            <span class="swatch" style="background:${event.categoryColor}"></span>
+            ${escapeHtml(event.title)}
+          </span>
+        `).join("")}
+        ${events.length > 3 ? `<span class="calendar-more">+${events.length - 3} more</span>` : ""}
+      </span>
+    </button>
+  `;
+}
+
+function groupEventsByDate(events: CalendarEvent[]): Map<string, CalendarEvent[]> {
+  const eventsByDate = new Map<string, CalendarEvent[]>();
+
+  for (const event of events) {
+    const groupedEvents = eventsByDate.get(event.occurrenceDate) ?? [];
+    groupedEvents.push(event);
+    eventsByDate.set(event.occurrenceDate, groupedEvents);
+  }
+
+  return eventsByDate;
+}
+
+function moveCalendarCursor(direction: -1 | 1): void {
+  if (state.displayMode === "month") {
+    state.calendarCursor = addMonths(state.calendarCursor, direction);
+  } else if (state.displayMode === "week") {
+    state.calendarCursor = addDaysLocal(state.calendarCursor, direction * 7);
+  } else {
+    state.calendarCursor = addDaysLocal(state.calendarCursor, direction);
+  }
+
+  renderCurrentView();
+}
+
+function syncDisplayModeControls(): void {
+  displayModeInputs.forEach((input) => {
+    input.checked = input.value === state.displayMode;
+  });
+}
+
+function calendarPeriodText(): string {
+  if (state.displayMode === "month") {
+    return monthYearFormatter.format(state.calendarCursor);
+  }
+
+  if (state.displayMode === "week") {
+    const start = startOfWeek(state.calendarCursor);
+    const end = endOfWeek(state.calendarCursor);
+    return `${shortDateFormatter.format(start)} - ${shortDateFormatter.format(end)}, ${end.getFullYear()}`;
+  }
+
+  return formatDateForDisplay(toDateOnly(state.calendarCursor));
+}
+
+function weekdayLabels(): string[] {
+  return datesBetween(startOfWeek(startOfToday()), endOfWeek(startOfToday()))
+    .map((date) => weekdayFormatter.format(date));
 }
 
 function toggleCategory(categoryId: number): void {
@@ -337,21 +580,21 @@ function toggleCategory(categoryId: number): void {
 
   saveHiddenCategoryIds();
   renderCategories();
-  renderEvents();
+  renderCurrentView();
 }
 
 function showAllCategories(): void {
   state.hiddenCategoryIds.clear();
   saveHiddenCategoryIds();
   renderCategories();
-  renderEvents();
+  renderCurrentView();
 }
 
 function hideAllCategories(): void {
   state.hiddenCategoryIds = new Set(state.categories.map((category) => category.id));
   saveHiddenCategoryIds();
   renderCategories();
-  renderEvents();
+  renderCurrentView();
 }
 
 function updateFilterSummary(): void {
@@ -409,8 +652,7 @@ function saveHiddenCategoryIds(): void {
 
 function renderEventCard(event: CalendarEvent): string {
   const canManage = event.source === "manual";
-  const recurrenceLabel = event.recurrence === "annual" ? "Yearly" : "Once";
-  const sourceLabel = event.source === "manual" ? recurrenceLabel : labelForSource(event.source);
+  const sourceLabel = labelForSource(event.source);
   const details = renderEventDetails(event);
   const menu = canManage
     ? `
@@ -429,7 +671,10 @@ function renderEventCard(event: CalendarEvent): string {
   return `
     <article class="event-card" style="--event-color:${event.categoryColor}">
       <div class="event-main">
-        <h3 class="event-title">${escapeHtml(event.title)}</h3>
+        <div class="event-title-row">
+          <h3 class="event-title">${escapeHtml(event.title)}</h3>
+          ${menu}
+        </div>
         <div class="event-meta">
           <span class="category-pill">
             <span class="swatch" style="background:${event.categoryColor}"></span>
@@ -440,7 +685,6 @@ function renderEventCard(event: CalendarEvent): string {
         </div>
       </div>
       <div class="event-side">
-        ${menu}
         <div class="countdown" aria-label="${event.daysUntil} days until ${escapeHtml(event.title)}">
           <span class="countdown-value">${formatCountdown(event.occurrenceDate)}</span>
           <span class="countdown-label">${countdownLabel(event.daysUntil)}</span>
@@ -452,13 +696,15 @@ function renderEventCard(event: CalendarEvent): string {
 }
 
 function renderEventDetails(event: CalendarEvent): string {
-  if (!state.settings.eventDetailsEnabled || !event.detailsEnabled) {
+  if (!state.settings.eventDetailsEnabled) {
     return "";
   }
 
   const summary = event.detailSummary.trim();
   const startDate = event.detailStartDate.trim();
-  if (!summary && !startDate) {
+  const showCustomDetails = event.detailsEnabled && (summary || startDate);
+  const showRecurrence = event.source === "manual";
+  if (!showCustomDetails && !showRecurrence) {
     return "";
   }
 
@@ -467,7 +713,17 @@ function renderEventDetails(event: CalendarEvent): string {
       <summary>Details</summary>
       <div class="event-detail-content">
         ${
-          startDate
+          showRecurrence
+            ? `
+              <div class="detail-row">
+                <span>Repeats</span>
+                <strong>${escapeHtml(event.recurrenceLabel)}</strong>
+              </div>
+            `
+            : ""
+        }
+        ${
+          showCustomDetails && startDate
             ? `
               <div class="detail-row">
                 <span>${escapeHtml(event.detailStartLabel || "Start date")}</span>
@@ -476,7 +732,7 @@ function renderEventDetails(event: CalendarEvent): string {
             `
             : ""
         }
-        ${summary ? `<p>${escapeHtml(summary)}</p>` : ""}
+        ${showCustomDetails && summary ? `<p>${escapeHtml(summary)}</p>` : ""}
       </div>
     </details>
   `;
@@ -490,7 +746,7 @@ function closeEventActionMenu(button: HTMLButtonElement): void {
 }
 
 function closeEventActionMenus(except?: HTMLDetailsElement): void {
-  eventList.querySelectorAll(".event-actions-menu").forEach((menu) => {
+  document.querySelectorAll(".event-actions-menu").forEach((menu) => {
     const eventMenu = menu as HTMLDetailsElement;
     if (eventMenu !== except) {
       eventMenu.open = false;
@@ -569,12 +825,13 @@ async function handleImport(event: SubmitEvent): Promise<void> {
 }
 
 function getPayload(): EventPayload {
-  const recurrenceInput = form.querySelector("input[name='recurrence']:checked") as HTMLInputElement;
-
   return {
     title: titleInput.value.trim(),
     eventDate: dateInput.value,
-    recurrence: recurrenceInput.value === "annual" ? "annual" : "none",
+    recurrence: recurrenceTypeInput.value as Recurrence,
+    recurrenceInterval: recurrenceTypeInput.value === "none"
+      ? 1
+      : Math.max(1, Number(recurrenceIntervalInput.value) || 1),
     categoryName: categoryInput.value.trim(),
     categoryColor: categoryColor.disabled ? "" : categoryColor.value,
     notes: notesInput.value.trim(),
@@ -587,22 +844,20 @@ function startEditing(event: CalendarEvent): void {
   state.editingId = event.id;
   titleInput.value = event.title;
   dateInput.value = event.eventDate;
+  recurrenceTypeInput.value = event.recurrence;
+  recurrenceIntervalInput.value = String(event.recurrenceInterval || 1);
   categoryInput.value = event.categoryName;
   categoryColor.value = event.categoryColor;
   detailsEnabledInput.checked = event.detailsEnabled;
   notesInput.value = event.detailSummary || event.notes || "";
   detailStartDateInput.value = event.detailStartDate ?? "";
 
-  const recurrenceInput = form.querySelector(
-    `input[name='recurrence'][value='${event.recurrence}']`
-  ) as HTMLInputElement;
-  recurrenceInput.checked = true;
-
   formTitle.textContent = "Edit event";
   submitButton.textContent = "Save changes";
   cancelEditButton.classList.remove("hidden");
   syncCategoryColor();
   syncEventDetailsFields();
+  syncRecurrenceFields();
   showView("home");
   openEventModal();
 }
@@ -616,6 +871,7 @@ function resetForm(clearMessage = true): void {
   cancelEditButton.classList.add("hidden");
   syncCategoryColor();
   syncEventDetailsFields();
+  syncRecurrenceFields();
 
   if (clearMessage) {
     setMessage("");
@@ -647,6 +903,24 @@ function syncCategoryColor(): void {
 
 function syncEventDetailsFields(): void {
   eventDetailsFields.classList.toggle("hidden", !detailsEnabledInput.checked);
+}
+
+function syncRecurrenceFields(): void {
+  const recurrence = recurrenceTypeInput.value as Recurrence;
+  const isRecurring = recurrence !== "none";
+  recurrenceIntervalRow.classList.toggle("hidden", !isRecurring);
+
+  const units: Record<Exclude<Recurrence, "none">, string> = {
+    daily: "day",
+    weekly: "week",
+    monthly: "month",
+    annual: "year"
+  };
+  if (isRecurring) {
+    const unit = units[recurrence];
+    const interval = Math.max(1, Number(recurrenceIntervalInput.value) || 1);
+    recurrenceUnitLabel.textContent = interval === 1 ? unit : `${unit}s`;
+  }
 }
 
 function syncImportCategoryColor(): void {
@@ -734,6 +1008,36 @@ function parseDateOnly(dateString: string): Date {
 function startOfToday(): Date {
   const now = new Date();
   return new Date(now.getFullYear(), now.getMonth(), now.getDate());
+}
+
+function startOfWeek(date: Date): Date {
+  return addDaysLocal(date, -date.getDay());
+}
+
+function endOfWeek(date: Date): Date {
+  return addDaysLocal(startOfWeek(date), 6);
+}
+
+function addDaysLocal(date: Date, days: number): Date {
+  const next = new Date(date);
+  next.setDate(next.getDate() + days);
+  return new Date(next.getFullYear(), next.getMonth(), next.getDate());
+}
+
+function datesBetween(start: Date, end: Date): Date[] {
+  const days: Date[] = [];
+  let cursor = new Date(start);
+
+  while (cursor <= end) {
+    days.push(new Date(cursor));
+    cursor = addDaysLocal(cursor, 1);
+  }
+
+  return days;
+}
+
+function sameDate(first: Date, second: Date): boolean {
+  return toDateOnly(first) === toDateOnly(second);
 }
 
 function addMonths(date: Date, count: number): Date {

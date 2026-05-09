@@ -7,8 +7,11 @@ const state = {
     activeView: "home",
     hiddenCategoryIds: loadHiddenCategoryIds(),
     settings: {
-        eventDetailsEnabled: true
-    }
+        eventDetailsEnabled: true,
+        darkModeEnabled: false
+    },
+    displayMode: "list",
+    calendarCursor: startOfToday()
 };
 const navButtons = Array.from(document.querySelectorAll("[data-view-target]"));
 const openEventButtons = Array.from(document.querySelectorAll("[data-open-event-modal]"));
@@ -23,6 +26,10 @@ const cancelEditButton = document.querySelector("#cancel-edit");
 const formMessage = document.querySelector("#form-message");
 const titleInput = document.querySelector("#title");
 const dateInput = document.querySelector("#event-date");
+const recurrenceTypeInput = document.querySelector("#recurrence-type");
+const recurrenceIntervalRow = document.querySelector("#recurrence-interval-row");
+const recurrenceIntervalInput = document.querySelector("#recurrence-interval");
+const recurrenceUnitLabel = document.querySelector("#recurrence-unit-label");
 const categoryInput = document.querySelector("#category-name");
 const categoryColor = document.querySelector("#category-color");
 const colorState = document.querySelector("#color-state");
@@ -37,6 +44,13 @@ const filterSummaryCount = document.querySelector("#filter-summary-count");
 const showAllCategoriesButton = document.querySelector("#show-all-categories");
 const hideAllCategoriesButton = document.querySelector("#hide-all-categories");
 const rangeDays = document.querySelector("#range-days");
+const displayModeInputs = Array.from(document.querySelectorAll("input[name='displayMode']"));
+const calendarToolbar = document.querySelector("#calendar-toolbar");
+const calendarPeriodLabel = document.querySelector("#calendar-period-label");
+const calendarPrevButton = document.querySelector("#calendar-prev");
+const calendarTodayButton = document.querySelector("#calendar-today");
+const calendarNextButton = document.querySelector("#calendar-next");
+const calendarBoard = document.querySelector("#calendar-board");
 const importForm = document.querySelector("#import-form");
 const importFile = document.querySelector("#import-file");
 const importFormat = document.querySelector("#import-format");
@@ -45,6 +59,7 @@ const importCategoryColor = document.querySelector("#import-category-color");
 const importColorState = document.querySelector("#import-color-state");
 const importMessage = document.querySelector("#import-message");
 const eventDetailsSetting = document.querySelector("#event-details-setting");
+const darkModeSetting = document.querySelector("#dark-mode-setting");
 const settingsMessage = document.querySelector("#settings-message");
 const dateFormatter = new Intl.DateTimeFormat(undefined, {
     weekday: "short",
@@ -56,6 +71,17 @@ const detailDateFormatter = new Intl.DateTimeFormat(undefined, {
     month: "short",
     day: "numeric",
     year: "numeric"
+});
+const monthYearFormatter = new Intl.DateTimeFormat(undefined, {
+    month: "long",
+    year: "numeric"
+});
+const shortDateFormatter = new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric"
+});
+const weekdayFormatter = new Intl.DateTimeFormat(undefined, {
+    weekday: "short"
 });
 navButtons.forEach((button)=>{
     button.addEventListener("click", ()=>{
@@ -80,15 +106,33 @@ eventDialog.addEventListener("click", (event)=>{
 });
 categoryInput.addEventListener("input", syncCategoryColor);
 detailsEnabledInput.addEventListener("change", syncEventDetailsFields);
+recurrenceTypeInput.addEventListener("change", syncRecurrenceFields);
+recurrenceIntervalInput.addEventListener("input", syncRecurrenceFields);
 rangeDays.addEventListener("change", refreshEvents);
 showAllCategoriesButton.addEventListener("click", showAllCategories);
 hideAllCategoriesButton.addEventListener("click", hideAllCategories);
+displayModeInputs.forEach((input)=>{
+    input.addEventListener("change", ()=>{
+        if (input.checked) {
+            state.displayMode = input.value;
+            renderCurrentView();
+        }
+    });
+});
+calendarPrevButton.addEventListener("click", ()=>moveCalendarCursor(-1));
+calendarTodayButton.addEventListener("click", ()=>{
+    state.calendarCursor = startOfToday();
+    renderCurrentView();
+});
+calendarNextButton.addEventListener("click", ()=>moveCalendarCursor(1));
 importForm.addEventListener("submit", handleImport);
 importCategoryInput.addEventListener("input", syncImportCategoryColor);
 eventDetailsSetting.addEventListener("change", updateEventDetailsSetting);
+darkModeSetting.addEventListener("change", updateEventDetailsSetting);
 void initialize();
 async function initialize() {
     setTodayAsDefault();
+    syncRecurrenceFields();
     await refreshSettings();
     await refreshCategories();
     await refreshEvents();
@@ -103,6 +147,8 @@ async function refreshSettings() {
     const data = await apiGet("/api/settings");
     state.settings = data.settings;
     eventDetailsSetting.checked = state.settings.eventDetailsEnabled;
+    darkModeSetting.checked = state.settings.darkModeEnabled;
+    applyTheme();
 }
 async function refreshCategories() {
     const data = await apiGet("/api/categories");
@@ -115,23 +161,30 @@ async function refreshCategories() {
 async function refreshEvents() {
     const data = await apiGet(`/api/events?days=${rangeDays.value}`);
     state.events = data.events;
-    renderEvents();
+    renderCurrentView();
 }
 async function updateEventDetailsSetting() {
     try {
         const data = await apiSend("/api/settings", "PUT", {
-            eventDetailsEnabled: eventDetailsSetting.checked
+            eventDetailsEnabled: eventDetailsSetting.checked,
+            darkModeEnabled: darkModeSetting.checked
         });
         state.settings = data.settings;
         eventDetailsSetting.checked = state.settings.eventDetailsEnabled;
+        darkModeSetting.checked = state.settings.darkModeEnabled;
+        applyTheme();
         settingsMessage.textContent = "Saved.";
         settingsMessage.classList.remove("error");
-        renderEvents();
+        renderCurrentView();
     } catch (error) {
         eventDetailsSetting.checked = state.settings.eventDetailsEnabled;
+        darkModeSetting.checked = state.settings.darkModeEnabled;
         settingsMessage.textContent = error instanceof Error ? error.message : "Could not save setting.";
         settingsMessage.classList.add("error");
     }
+}
+function applyTheme() {
+    document.documentElement.dataset.theme = state.settings.darkModeEnabled ? "dark" : "light";
 }
 function showView(viewName) {
     state.activeView = viewName;
@@ -193,6 +246,9 @@ function renderCategories() {
 }
 function renderEvents() {
     const visibleEvents = state.events.filter((event)=>!state.hiddenCategoryIds.has(event.categoryId));
+    calendarToolbar.classList.add("hidden");
+    calendarBoard.classList.add("hidden");
+    eventList.classList.remove("hidden");
     if (!state.events.length) {
         eventList.innerHTML = `<div class="empty-state">No events in this range.</div>`;
         return;
@@ -202,7 +258,10 @@ function renderEvents() {
         return;
     }
     eventList.innerHTML = visibleEvents.map(renderEventCard).join("");
-    eventList.querySelectorAll("[data-edit-id]").forEach((button)=>{
+    wireEventActions(eventList);
+}
+function wireEventActions(root) {
+    root.querySelectorAll("[data-edit-id]").forEach((button)=>{
         button.addEventListener("click", ()=>{
             closeEventActionMenu(button);
             const id = Number(button.dataset.editId);
@@ -212,7 +271,7 @@ function renderEvents() {
             }
         });
     });
-    eventList.querySelectorAll("[data-delete-id]").forEach((button)=>{
+    root.querySelectorAll("[data-delete-id]").forEach((button)=>{
         button.addEventListener("click", async ()=>{
             closeEventActionMenu(button);
             const id = Number(button.dataset.deleteId);
@@ -223,7 +282,7 @@ function renderEvents() {
             await deleteEvent(id);
         });
     });
-    eventList.querySelectorAll(".event-actions-menu").forEach((menu)=>{
+    root.querySelectorAll(".event-actions-menu").forEach((menu)=>{
         menu.addEventListener("toggle", ()=>{
             const eventMenu = menu;
             if (eventMenu.open) {
@@ -231,6 +290,148 @@ function renderEvents() {
             }
         });
     });
+}
+function renderCurrentView() {
+    if (state.displayMode === "list") {
+        renderEvents();
+        return;
+    }
+    renderCalendarView();
+}
+function renderCalendarView() {
+    const visibleEvents = state.events.filter((event)=>!state.hiddenCategoryIds.has(event.categoryId));
+    const eventsByDate = groupEventsByDate(visibleEvents);
+    calendarToolbar.classList.remove("hidden");
+    calendarBoard.classList.remove("hidden");
+    eventList.classList.add("hidden");
+    calendarPeriodLabel.textContent = calendarPeriodText();
+    if (state.displayMode === "month") {
+        calendarBoard.innerHTML = renderMonthView(eventsByDate);
+    } else if (state.displayMode === "week") {
+        calendarBoard.innerHTML = renderWeekView(eventsByDate);
+    } else {
+        calendarBoard.innerHTML = renderDayView(eventsByDate);
+    }
+    calendarBoard.querySelectorAll("[data-calendar-date]").forEach((button)=>{
+        button.addEventListener("click", ()=>{
+            const dateValue = button.dataset.calendarDate;
+            if (!dateValue) {
+                return;
+            }
+            state.calendarCursor = parseDateOnly(dateValue);
+            state.displayMode = "day";
+            syncDisplayModeControls();
+            renderCurrentView();
+        });
+    });
+    wireEventActions(calendarBoard);
+}
+function renderMonthView(eventsByDate) {
+    const cursor = state.calendarCursor;
+    const firstOfMonth = new Date(cursor.getFullYear(), cursor.getMonth(), 1);
+    const lastOfMonth = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 0);
+    const start = startOfWeek(firstOfMonth);
+    const end = endOfWeek(lastOfMonth);
+    const days = datesBetween(start, end);
+    return `
+    <div class="calendar-weekdays">
+      ${weekdayLabels().map((day)=>`<span>${day}</span>`).join("")}
+    </div>
+    <div class="calendar-grid calendar-grid-month">
+      ${days.map((date)=>renderCalendarDayButton(date, eventsByDate, date.getMonth() === cursor.getMonth())).join("")}
+    </div>
+  `;
+}
+function renderWeekView(eventsByDate) {
+    const start = startOfWeek(state.calendarCursor);
+    const days = datesBetween(start, endOfWeek(state.calendarCursor));
+    return `
+    <div class="calendar-grid calendar-grid-week">
+      ${days.map((date)=>renderCalendarDayButton(date, eventsByDate, true)).join("")}
+    </div>
+  `;
+}
+function renderDayView(eventsByDate) {
+    const dateKey = toDateOnly(state.calendarCursor);
+    const events = eventsByDate.get(dateKey) ?? [];
+    const cards = events.length ? events.map(renderEventCard).join("") : `<div class="empty-state">No events on this day.</div>`;
+    return `
+    <section class="calendar-day-agenda">
+      <div class="panel-heading">
+        <p class="eyebrow">${weekdayFormatter.format(state.calendarCursor)}</p>
+        <h2>${formatDateForDisplay(dateKey)}</h2>
+      </div>
+      <div class="event-list">${cards}</div>
+    </section>
+  `;
+}
+function renderCalendarDayButton(date, eventsByDate, inPrimaryPeriod) {
+    const dateKey = toDateOnly(date);
+    const events = eventsByDate.get(dateKey) ?? [];
+    const classes = [
+        "calendar-day",
+        inPrimaryPeriod ? "" : "is-outside",
+        sameDate(date, startOfToday()) ? "is-today" : "",
+        events.length ? "has-events" : ""
+    ].filter(Boolean).join(" ");
+    return `
+    <button class="${classes}" type="button" data-calendar-date="${dateKey}">
+      <span class="calendar-day-heading">
+        <span class="calendar-weekday">${weekdayFormatter.format(date)}</span>
+        <span class="calendar-day-number">${date.getDate()}</span>
+      </span>
+      <span class="calendar-markers" aria-label="${events.length} events">
+        ${events.slice(0, 5).map((event)=>`<span class="calendar-dot" style="background:${event.categoryColor}"></span>`).join("")}
+      </span>
+      <span class="calendar-items">
+        ${events.slice(0, 3).map((event)=>`
+          <span class="calendar-item">
+            <span class="swatch" style="background:${event.categoryColor}"></span>
+            ${escapeHtml(event.title)}
+          </span>
+        `).join("")}
+        ${events.length > 3 ? `<span class="calendar-more">+${events.length - 3} more</span>` : ""}
+      </span>
+    </button>
+  `;
+}
+function groupEventsByDate(events) {
+    const eventsByDate = new Map();
+    for (const event of events){
+        const groupedEvents = eventsByDate.get(event.occurrenceDate) ?? [];
+        groupedEvents.push(event);
+        eventsByDate.set(event.occurrenceDate, groupedEvents);
+    }
+    return eventsByDate;
+}
+function moveCalendarCursor(direction) {
+    if (state.displayMode === "month") {
+        state.calendarCursor = addMonths(state.calendarCursor, direction);
+    } else if (state.displayMode === "week") {
+        state.calendarCursor = addDaysLocal(state.calendarCursor, direction * 7);
+    } else {
+        state.calendarCursor = addDaysLocal(state.calendarCursor, direction);
+    }
+    renderCurrentView();
+}
+function syncDisplayModeControls() {
+    displayModeInputs.forEach((input)=>{
+        input.checked = input.value === state.displayMode;
+    });
+}
+function calendarPeriodText() {
+    if (state.displayMode === "month") {
+        return monthYearFormatter.format(state.calendarCursor);
+    }
+    if (state.displayMode === "week") {
+        const start = startOfWeek(state.calendarCursor);
+        const end = endOfWeek(state.calendarCursor);
+        return `${shortDateFormatter.format(start)} - ${shortDateFormatter.format(end)}, ${end.getFullYear()}`;
+    }
+    return formatDateForDisplay(toDateOnly(state.calendarCursor));
+}
+function weekdayLabels() {
+    return datesBetween(startOfWeek(startOfToday()), endOfWeek(startOfToday())).map((date)=>weekdayFormatter.format(date));
 }
 function toggleCategory(categoryId) {
     if (state.hiddenCategoryIds.has(categoryId)) {
@@ -240,19 +441,19 @@ function toggleCategory(categoryId) {
     }
     saveHiddenCategoryIds();
     renderCategories();
-    renderEvents();
+    renderCurrentView();
 }
 function showAllCategories() {
     state.hiddenCategoryIds.clear();
     saveHiddenCategoryIds();
     renderCategories();
-    renderEvents();
+    renderCurrentView();
 }
 function hideAllCategories() {
     state.hiddenCategoryIds = new Set(state.categories.map((category)=>category.id));
     saveHiddenCategoryIds();
     renderCategories();
-    renderEvents();
+    renderCurrentView();
 }
 function updateFilterSummary() {
     const visibleCount = state.categories.filter((category)=>!state.hiddenCategoryIds.has(category.id)).length;
@@ -291,8 +492,7 @@ function saveHiddenCategoryIds() {
 }
 function renderEventCard(event) {
     const canManage = event.source === "manual";
-    const recurrenceLabel = event.recurrence === "annual" ? "Yearly" : "Once";
-    const sourceLabel = event.source === "manual" ? recurrenceLabel : labelForSource(event.source);
+    const sourceLabel = labelForSource(event.source);
     const details = renderEventDetails(event);
     const menu = canManage ? `
       <details class="event-actions-menu">
@@ -308,7 +508,10 @@ function renderEventCard(event) {
     return `
     <article class="event-card" style="--event-color:${event.categoryColor}">
       <div class="event-main">
-        <h3 class="event-title">${escapeHtml(event.title)}</h3>
+        <div class="event-title-row">
+          <h3 class="event-title">${escapeHtml(event.title)}</h3>
+          ${menu}
+        </div>
         <div class="event-meta">
           <span class="category-pill">
             <span class="swatch" style="background:${event.categoryColor}"></span>
@@ -319,7 +522,6 @@ function renderEventCard(event) {
         </div>
       </div>
       <div class="event-side">
-        ${menu}
         <div class="countdown" aria-label="${event.daysUntil} days until ${escapeHtml(event.title)}">
           <span class="countdown-value">${formatCountdown(event.occurrenceDate)}</span>
           <span class="countdown-label">${countdownLabel(event.daysUntil)}</span>
@@ -330,25 +532,33 @@ function renderEventCard(event) {
   `;
 }
 function renderEventDetails(event) {
-    if (!state.settings.eventDetailsEnabled || !event.detailsEnabled) {
+    if (!state.settings.eventDetailsEnabled) {
         return "";
     }
     const summary = event.detailSummary.trim();
     const startDate = event.detailStartDate.trim();
-    if (!summary && !startDate) {
+    const showCustomDetails = event.detailsEnabled && (summary || startDate);
+    const showRecurrence = event.source === "manual";
+    if (!showCustomDetails && !showRecurrence) {
         return "";
     }
     return `
     <details class="event-detail-panel">
       <summary>Details</summary>
       <div class="event-detail-content">
-        ${startDate ? `
+        ${showRecurrence ? `
+              <div class="detail-row">
+                <span>Repeats</span>
+                <strong>${escapeHtml(event.recurrenceLabel)}</strong>
+              </div>
+            ` : ""}
+        ${showCustomDetails && startDate ? `
               <div class="detail-row">
                 <span>${escapeHtml(event.detailStartLabel || "Start date")}</span>
                 <strong>${formatDetailDate(startDate)}</strong>
               </div>
             ` : ""}
-        ${summary ? `<p>${escapeHtml(summary)}</p>` : ""}
+        ${showCustomDetails && summary ? `<p>${escapeHtml(summary)}</p>` : ""}
       </div>
     </details>
   `;
@@ -360,7 +570,7 @@ function closeEventActionMenu(button) {
     }
 }
 function closeEventActionMenus(except) {
-    eventList.querySelectorAll(".event-actions-menu").forEach((menu)=>{
+    document.querySelectorAll(".event-actions-menu").forEach((menu)=>{
         const eventMenu = menu;
         if (eventMenu !== except) {
             eventMenu.open = false;
@@ -427,11 +637,11 @@ async function handleImport(event) {
     }
 }
 function getPayload() {
-    const recurrenceInput = form.querySelector("input[name='recurrence']:checked");
     return {
         title: titleInput.value.trim(),
         eventDate: dateInput.value,
-        recurrence: recurrenceInput.value === "annual" ? "annual" : "none",
+        recurrence: recurrenceTypeInput.value,
+        recurrenceInterval: recurrenceTypeInput.value === "none" ? 1 : Math.max(1, Number(recurrenceIntervalInput.value) || 1),
         categoryName: categoryInput.value.trim(),
         categoryColor: categoryColor.disabled ? "" : categoryColor.value,
         notes: notesInput.value.trim(),
@@ -443,18 +653,19 @@ function startEditing(event) {
     state.editingId = event.id;
     titleInput.value = event.title;
     dateInput.value = event.eventDate;
+    recurrenceTypeInput.value = event.recurrence;
+    recurrenceIntervalInput.value = String(event.recurrenceInterval || 1);
     categoryInput.value = event.categoryName;
     categoryColor.value = event.categoryColor;
     detailsEnabledInput.checked = event.detailsEnabled;
     notesInput.value = event.detailSummary || event.notes || "";
     detailStartDateInput.value = event.detailStartDate ?? "";
-    const recurrenceInput = form.querySelector(`input[name='recurrence'][value='${event.recurrence}']`);
-    recurrenceInput.checked = true;
     formTitle.textContent = "Edit event";
     submitButton.textContent = "Save changes";
     cancelEditButton.classList.remove("hidden");
     syncCategoryColor();
     syncEventDetailsFields();
+    syncRecurrenceFields();
     showView("home");
     openEventModal();
 }
@@ -467,6 +678,7 @@ function resetForm(clearMessage = true) {
     cancelEditButton.classList.add("hidden");
     syncCategoryColor();
     syncEventDetailsFields();
+    syncRecurrenceFields();
     if (clearMessage) {
         setMessage("");
     }
@@ -493,6 +705,22 @@ function syncCategoryColor() {
 }
 function syncEventDetailsFields() {
     eventDetailsFields.classList.toggle("hidden", !detailsEnabledInput.checked);
+}
+function syncRecurrenceFields() {
+    const recurrence = recurrenceTypeInput.value;
+    const isRecurring = recurrence !== "none";
+    recurrenceIntervalRow.classList.toggle("hidden", !isRecurring);
+    const units = {
+        daily: "day",
+        weekly: "week",
+        monthly: "month",
+        annual: "year"
+    };
+    if (isRecurring) {
+        const unit = units[recurrence];
+        const interval = Math.max(1, Number(recurrenceIntervalInput.value) || 1);
+        recurrenceUnitLabel.textContent = interval === 1 ? unit : `${unit}s`;
+    }
 }
 function syncImportCategoryColor() {
     const category = findCategory(importCategoryInput.value.trim());
@@ -564,6 +792,29 @@ function parseDateOnly(dateString) {
 function startOfToday() {
     const now = new Date();
     return new Date(now.getFullYear(), now.getMonth(), now.getDate());
+}
+function startOfWeek(date) {
+    return addDaysLocal(date, -date.getDay());
+}
+function endOfWeek(date) {
+    return addDaysLocal(startOfWeek(date), 6);
+}
+function addDaysLocal(date, days) {
+    const next = new Date(date);
+    next.setDate(next.getDate() + days);
+    return new Date(next.getFullYear(), next.getMonth(), next.getDate());
+}
+function datesBetween(start, end) {
+    const days = [];
+    let cursor = new Date(start);
+    while(cursor <= end){
+        days.push(new Date(cursor));
+        cursor = addDaysLocal(cursor, 1);
+    }
+    return days;
+}
+function sameDate(first, second) {
+    return toDateOnly(first) === toDateOnly(second);
 }
 function addMonths(date, count) {
     const next = new Date(date);

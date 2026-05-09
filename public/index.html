@@ -27,29 +27,60 @@
               <p class="eyebrow">Upcoming</p>
               <h2>Next dates</h2>
             </div>
-            <label class="range-control">
-              <span>Range</span>
-              <select id="range-days">
-                <option value="90">90 days</option>
-                <option value="180">6 months</option>
-                <option value="365">1 year</option>
-                <option value="730" selected>2 years</option>
-                <option value="3650">10 years</option>
-              </select>
-            </label>
           </div>
 
-          <details id="calendar-filter" class="calendar-filter">
+          <details id="view-options" class="calendar-filter">
             <summary class="filter-summary">
-              <span>Calendars</span>
+              <span>View options</span>
               <span id="filter-summary-count">All shown</span>
             </summary>
+            <div class="view-options-grid">
+              <label class="range-control">
+                <span>Range</span>
+                <select id="range-days">
+                  <option value="90">90 days</option>
+                  <option value="180">6 months</option>
+                  <option value="365">1 year</option>
+                  <option value="730" selected>2 years</option>
+                  <option value="3650">10 years</option>
+                </select>
+              </label>
+
+              <fieldset class="segmented display-mode-control" aria-label="Display mode">
+                <legend>View</legend>
+                <label>
+                  <input type="radio" name="displayMode" value="list" checked>
+                  <span>List</span>
+                </label>
+                <label>
+                  <input type="radio" name="displayMode" value="month">
+                  <span>Month</span>
+                </label>
+                <label>
+                  <input type="radio" name="displayMode" value="week">
+                  <span>Week</span>
+                </label>
+                <label>
+                  <input type="radio" name="displayMode" value="day">
+                  <span>Day</span>
+                </label>
+              </fieldset>
+            </div>
+
             <div class="filter-actions" aria-label="Calendar filter actions">
               <button class="button button-ghost" id="show-all-categories" type="button">Show all</button>
               <button class="button button-ghost" id="hide-all-categories" type="button">Hide all</button>
             </div>
             <div id="category-legend" class="category-legend" aria-label="Calendars"></div>
           </details>
+
+          <div id="calendar-toolbar" class="calendar-toolbar hidden">
+            <button class="button button-ghost" id="calendar-prev" type="button">Previous</button>
+            <strong id="calendar-period-label"></strong>
+            <button class="button button-ghost" id="calendar-today" type="button">Today</button>
+            <button class="button button-ghost" id="calendar-next" type="button">Next</button>
+          </div>
+          <div id="calendar-board" class="calendar-board hidden" aria-live="polite"></div>
           <div id="event-list" class="event-list" aria-live="polite"></div>
         </section>
       </section>
@@ -64,6 +95,10 @@
             <label class="toggle-row">
               <input id="event-details-setting" type="checkbox" checked>
               <span>Enable expandable holiday and event details</span>
+            </label>
+            <label class="toggle-row">
+              <input id="dark-mode-setting" type="checkbox">
+              <span>Enable dark mode</span>
             </label>
             <p id="settings-message" class="form-message" role="status"></p>
           </section>
@@ -147,17 +182,24 @@
               <span>Date</span>
               <input id="event-date" name="eventDate" type="date" required>
             </label>
-            <fieldset class="segmented" aria-label="Recurrence">
-              <legend>Repeats</legend>
-              <label>
-                <input type="radio" name="recurrence" value="none" checked>
-                <span>Once</span>
-              </label>
-              <label>
-                <input type="radio" name="recurrence" value="annual">
-                <span>Yearly</span>
-              </label>
-            </fieldset>
+            <label>
+              <span>Repeats</span>
+              <select id="recurrence-type" name="recurrence">
+                <option value="none" selected>Once</option>
+                <option value="daily">Daily</option>
+                <option value="weekly">Weekly</option>
+                <option value="monthly">Monthly</option>
+                <option value="annual">Yearly</option>
+              </select>
+            </label>
+          </div>
+
+          <div id="recurrence-interval-row" class="form-row recurrence-interval-row hidden">
+            <label>
+              <span>Every</span>
+              <input id="recurrence-interval" name="recurrenceInterval" type="number" min="1" max="999" value="1">
+            </label>
+            <div id="recurrence-unit-label" class="color-state">days</div>
           </div>
 
           <label>
