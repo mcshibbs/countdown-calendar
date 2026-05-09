@@ -1,0 +1,25 @@
+[Unit]
+Description=Countdown Calendar
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/countdown-calendar
+Environment=HOST=0.0.0.0
+Environment=HTTP_PORT=80
+Environment=HTTPS_PORT=443
+Environment=DB_PATH=/var/lib/countdown-calendar/calendar.db
+# Environment=TLS_CERT_PATH=/etc/letsencrypt/live/calendar.example.com/fullchain.pem
+# Environment=TLS_KEY_PATH=/etc/letsencrypt/live/calendar.example.com/privkey.pem
+ExecStart=/usr/bin/node --experimental-strip-types /opt/countdown-calendar/src/server.ts
+Restart=always
+RestartSec=3
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+ReadWritePaths=/var/lib/countdown-calendar
+
+[Install]
+WantedBy=multi-user.target
