@@ -249,6 +249,7 @@ function renderEvents(): void {
 
   eventList.querySelectorAll("[data-edit-id]").forEach((button) => {
     button.addEventListener("click", () => {
+      closeEventActionMenu(button as HTMLButtonElement);
       const id = Number((button as HTMLButtonElement).dataset.editId);
       const event = state.events.find((item) => item.id === id);
       if (event) {
@@ -259,12 +260,22 @@ function renderEvents(): void {
 
   eventList.querySelectorAll("[data-delete-id]").forEach((button) => {
     button.addEventListener("click", async () => {
+      closeEventActionMenu(button as HTMLButtonElement);
       const id = Number((button as HTMLButtonElement).dataset.deleteId);
       const event = state.events.find((item) => item.id === id);
       if (!event || !confirm(`Delete "${event.title}"?`)) {
         return;
       }
       await deleteEvent(id);
+    });
+  });
+
+  eventList.querySelectorAll(".event-actions-menu").forEach((menu) => {
+    menu.addEventListener("toggle", () => {
+      const eventMenu = menu as HTMLDetailsElement;
+      if (eventMenu.open) {
+        closeEventActionMenus(eventMenu);
+      }
     });
   });
 }
@@ -352,6 +363,19 @@ function renderEventCard(event: CalendarEvent): string {
   const canManage = event.source === "manual";
   const recurrenceLabel = event.recurrence === "annual" ? "Yearly" : "Once";
   const sourceLabel = event.source === "manual" ? recurrenceLabel : labelForSource(event.source);
+  const menu = canManage
+    ? `
+      <details class="event-actions-menu">
+        <summary class="event-menu-button" aria-label="Event actions">
+          <span class="sr-only">Event actions</span>
+        </summary>
+        <div class="event-menu-list" role="menu">
+          <button class="event-menu-item" type="button" role="menuitem" data-edit-id="${event.id}">Edit</button>
+          <button class="event-menu-item is-danger" type="button" role="menuitem" data-delete-id="${event.id}">Delete</button>
+        </div>
+      </details>
+    `
+    : "";
 
   return `
     <article class="event-card" style="--event-color:${event.categoryColor}">
@@ -366,22 +390,31 @@ function renderEventCard(event: CalendarEvent): string {
           <span>${sourceLabel}</span>
         </div>
       </div>
-      <div class="countdown" aria-label="${event.daysUntil} days until ${escapeHtml(event.title)}">
-        <span class="countdown-value">${formatCountdown(event.occurrenceDate)}</span>
-        <span class="countdown-label">${countdownLabel(event.daysUntil)}</span>
+      <div class="event-side">
+        ${menu}
+        <div class="countdown" aria-label="${event.daysUntil} days until ${escapeHtml(event.title)}">
+          <span class="countdown-value">${formatCountdown(event.occurrenceDate)}</span>
+          <span class="countdown-label">${countdownLabel(event.daysUntil)}</span>
+        </div>
       </div>
-      ${
-        canManage
-          ? `
-            <div class="event-actions">
-              <button class="button button-ghost" type="button" data-edit-id="${event.id}">Edit</button>
-              <button class="button button-danger" type="button" data-delete-id="${event.id}">Delete</button>
-            </div>
-          `
-          : ""
-      }
     </article>
   `;
+}
+
+function closeEventActionMenu(button: HTMLButtonElement): void {
+  const menu = button.closest("details");
+  if (menu instanceof HTMLDetailsElement) {
+    menu.open = false;
+  }
+}
+
+function closeEventActionMenus(except?: HTMLDetailsElement): void {
+  eventList.querySelectorAll(".event-actions-menu").forEach((menu) => {
+    const eventMenu = menu as HTMLDetailsElement;
+    if (eventMenu !== except) {
+      eventMenu.open = false;
+    }
+  });
 }
 
 async function handleSubmit(event: SubmitEvent): Promise<void> {

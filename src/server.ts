@@ -476,6 +476,11 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
     return;
   }
 
+  if (method === "GET" && url.pathname === "/api/import-template.csv") {
+    sendCsvTemplate(res);
+    return;
+  }
+
   sendJson(res, 404, { error: "Not found" });
 }
 
@@ -1057,6 +1062,21 @@ function sendDatabaseBackup(res: ServerResponse): void {
   sendFile(res, backupPath, "application/vnd.sqlite3", "countdown-calendar.db");
 }
 
+function sendCsvTemplate(res: ServerResponse): void {
+  const content = [
+    "title,date,category,recurrence,notes,color",
+    "Birthday Example,2026-07-09,Birthdays,annual,Optional note,#14b8a6",
+    "One-time Event Example,2026-12-31,Personal,none,Optional note,#2563eb"
+  ].join("\n");
+
+  res.writeHead(200, {
+    "Content-Type": "text/csv; charset=utf-8",
+    "Cache-Control": "no-store",
+    "Content-Disposition": `attachment; filename="countdown-calendar-import-template.csv"`
+  });
+  res.end(`${content}\n`);
+}
+
 function readJson(req: IncomingMessage, maxBytes = 1_000_000): Promise<unknown> {
   return new Promise((resolvePromise, reject) => {
     let body = "";
@@ -1149,6 +1169,7 @@ function contentType(filePath: string): string {
   const types: Record<string, string> = {
     ".html": "text/html; charset=utf-8",
     ".css": "text/css; charset=utf-8",
+    ".csv": "text/csv; charset=utf-8",
     ".js": "text/javascript; charset=utf-8",
     ".json": "application/json; charset=utf-8",
     ".svg": "image/svg+xml",

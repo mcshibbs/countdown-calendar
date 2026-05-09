@@ -392,6 +392,15 @@ input[type="color"]:disabled {
   display: none !important;
 }
 
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+}
+
 .form-message {
   min-height: 20px;
   margin: -4px 0 0;
@@ -579,6 +588,13 @@ input[type="color"]:disabled {
   min-width: 0;
 }
 
+.event-side {
+  display: grid;
+  gap: 10px;
+  justify-items: end;
+  align-self: stretch;
+}
+
 .event-title {
   margin: 0 0 8px;
   color: #202733;
@@ -605,6 +621,79 @@ input[type="color"]:disabled {
 .countdown {
   text-align: right;
   min-width: 124px;
+}
+
+.event-actions-menu {
+  position: relative;
+  justify-self: end;
+}
+
+.event-menu-button {
+  display: inline-grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+  color: #465367;
+  cursor: pointer;
+  list-style: none;
+}
+
+.event-menu-button::-webkit-details-marker {
+  display: none;
+}
+
+.event-menu-button::before {
+  content: "...";
+  display: block;
+  margin-top: -9px;
+  color: currentColor;
+  font-size: 1.35rem;
+  font-weight: 900;
+  letter-spacing: 1px;
+  line-height: 1;
+}
+
+.event-actions-menu[open] .event-menu-button {
+  border-color: var(--primary);
+  color: var(--primary-dark);
+}
+
+.event-menu-list {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 10;
+  display: grid;
+  min-width: 132px;
+  gap: 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: var(--shadow);
+  padding: 6px;
+}
+
+.event-menu-item {
+  min-height: 36px;
+  border: 0;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #202733;
+  padding: 0 10px;
+  text-align: left;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.event-menu-item:hover {
+  background: var(--surface-strong);
+}
+
+.event-menu-item.is-danger {
+  color: var(--danger);
 }
 
 .countdown-value {
@@ -759,6 +848,20 @@ input[type="color"]:disabled {
   .event-card {
     gap: 12px;
     padding: 16px;
+  }
+
+  .event-side {
+    justify-items: start;
+  }
+
+  .event-actions-menu,
+  .event-menu-list {
+    justify-self: start;
+  }
+
+  .event-menu-list {
+    left: 0;
+    right: auto;
   }
 
   .event-meta {
