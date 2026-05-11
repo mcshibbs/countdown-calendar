@@ -69,6 +69,7 @@ type CurrentUser = {
   displayName: string;
   email: string;
   dateOfBirth: string;
+  isAdmin: boolean;
 };
 
 type AuthSessionResponse = {
@@ -79,6 +80,7 @@ type AuthSessionResponse = {
     secret: string;
     setupUri: string;
   };
+  backupCodes?: string[];
 };
 
 type ShareItem = {
@@ -108,6 +110,31 @@ type AppSettings = {
   darkModeEnabled: boolean;
 };
 
+type AdminUser = {
+  id: number;
+  firstName: string;
+  lastName: string;
+  displayName: string;
+  email: string;
+  dateOfBirth: string;
+  mfaEnabled: boolean;
+  forceMfaSetup: boolean;
+  isAdmin: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type PendingInvite = {
+  email: string;
+  inviteCount: number;
+  updatedAt: string;
+};
+
+type AdminSummary = {
+  users: AdminUser[];
+  pendingInvites: PendingInvite[];
+};
+
 const state: {
   categories: Category[];
   events: CalendarEvent[];
@@ -120,6 +147,8 @@ const state: {
   user: CurrentUser | null;
   mfaMode: "setup" | "verify";
   shares: ShareState | null;
+  adminSummary: AdminSummary | null;
+  latestBackupCodes: string[];
 } = {
   categories: [],
   events: [],
@@ -131,7 +160,9 @@ const state: {
   calendarCursor: startOfToday(),
   user: null,
   mfaMode: "setup",
-  shares: null
+  shares: null,
+  adminSummary: null,
+  latestBackupCodes: []
 };
 
 const navButtons = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-view-target]"));
@@ -139,11 +170,21 @@ const openEventButtons = Array.from(document.querySelectorAll<HTMLButtonElement>
 const views = Array.from(document.querySelectorAll<HTMLElement>(".view"));
 const authShell = document.querySelector("#auth-shell") as HTMLElement;
 const appShell = document.querySelector("#app-shell") as HTMLElement;
-const authForms = document.querySelector("#auth-forms") as HTMLElement;
+const adminShell = document.querySelector("#admin-shell") as HTMLElement;
+const openLoginDialogButton = document.querySelector("#open-login-dialog") as HTMLButtonElement;
+const openSignupDialogButton = document.querySelector("#open-signup-dialog") as HTMLButtonElement;
+const loginDialog = document.querySelector("#login-dialog") as HTMLDialogElement;
+const signupDialog = document.querySelector("#signup-dialog") as HTMLDialogElement;
+const closeLoginDialogButton = document.querySelector("#close-login-dialog") as HTMLButtonElement;
+const closeSignupDialogButton = document.querySelector("#close-signup-dialog") as HTMLButtonElement;
 const loginForm = document.querySelector("#login-form") as HTMLFormElement;
+const loginMfaForm = document.querySelector("#login-mfa-form") as HTMLFormElement;
 const signupForm = document.querySelector("#signup-form") as HTMLFormElement;
 const loginEmail = document.querySelector("#login-email") as HTMLInputElement;
 const loginPassword = document.querySelector("#login-password") as HTMLInputElement;
+const loginMessage = document.querySelector("#login-message") as HTMLParagraphElement;
+const loginMfaCode = document.querySelector("#login-mfa-code") as HTMLInputElement;
+const loginMfaMessage = document.querySelector("#login-mfa-message") as HTMLParagraphElement;
 const signupFirstName = document.querySelector("#signup-first-name") as HTMLInputElement;
 const signupLastName = document.querySelector("#signup-last-name") as HTMLInputElement;
 const signupDisplayName = document.querySelector("#signup-display-name") as HTMLInputElement;
@@ -151,15 +192,25 @@ const signupEmail = document.querySelector("#signup-email") as HTMLInputElement;
 const signupDateOfBirth = document.querySelector("#signup-date-of-birth") as HTMLInputElement;
 const signupPassword = document.querySelector("#signup-password") as HTMLInputElement;
 const signupConfirmPassword = document.querySelector("#signup-confirm-password") as HTMLInputElement;
+const signupMessage = document.querySelector("#signup-message") as HTMLParagraphElement;
 const mfaPanel = document.querySelector("#mfa-panel") as HTMLElement;
 const mfaForm = document.querySelector("#mfa-form") as HTMLFormElement;
 const mfaSecret = document.querySelector("#mfa-secret") as HTMLInputElement;
 const mfaUri = document.querySelector("#mfa-uri") as HTMLInputElement;
 const mfaCode = document.querySelector("#mfa-code") as HTMLInputElement;
+const mfaMessage = document.querySelector("#mfa-message") as HTMLParagraphElement;
+const backupCodesPanel = document.querySelector("#backup-codes-panel") as HTMLElement;
+const backupCodesOutput = document.querySelector("#backup-codes-output") as HTMLTextAreaElement;
+const downloadSignupBackupCodesButton = document.querySelector("#download-signup-backup-codes") as HTMLButtonElement;
+const finishSignupButton = document.querySelector("#finish-signup") as HTMLButtonElement;
 const authMessage = document.querySelector("#auth-message") as HTMLParagraphElement;
 const navMenu = document.querySelector("#nav-menu") as HTMLDetailsElement;
 const userBadge = document.querySelector("#user-badge") as HTMLParagraphElement;
 const logoutButton = document.querySelector("#logout-button") as HTMLButtonElement;
+const adminUserBadge = document.querySelector("#admin-user-badge") as HTMLParagraphElement;
+const adminLogoutButton = document.querySelector("#admin-logout-button") as HTMLButtonElement;
+const adminUsers = document.querySelector("#admin-users") as HTMLDivElement;
+const adminPendingInvites = document.querySelector("#admin-pending-invites") as HTMLDivElement;
 const eventDialog = document.querySelector("#event-dialog") as HTMLDialogElement;
 const closeEventModalButton = document.querySelector("#close-event-modal") as HTMLButtonElement;
 
@@ -206,6 +257,20 @@ const importMessage = document.querySelector("#import-message") as HTMLParagraph
 const eventDetailsSetting = document.querySelector("#event-details-setting") as HTMLInputElement;
 const darkModeSetting = document.querySelector("#dark-mode-setting") as HTMLInputElement;
 const settingsMessage = document.querySelector("#settings-message") as HTMLParagraphElement;
+const settingsBackupCodesButton = document.querySelector("#settings-backup-codes") as HTMLButtonElement;
+const openMfaResetButton = document.querySelector("#open-mfa-reset") as HTMLButtonElement;
+const securityMessage = document.querySelector("#security-message") as HTMLParagraphElement;
+const mfaResetDialog = document.querySelector("#mfa-reset-dialog") as HTMLDialogElement;
+const closeMfaResetButton = document.querySelector("#close-mfa-reset") as HTMLButtonElement;
+const mfaResetPasswordForm = document.querySelector("#mfa-reset-password-form") as HTMLFormElement;
+const mfaResetPassword = document.querySelector("#mfa-reset-password") as HTMLInputElement;
+const mfaResetPasswordMessage = document.querySelector("#mfa-reset-password-message") as HTMLParagraphElement;
+const mfaResetSetup = document.querySelector("#mfa-reset-setup") as HTMLElement;
+const mfaResetSecret = document.querySelector("#mfa-reset-secret") as HTMLInputElement;
+const mfaResetUri = document.querySelector("#mfa-reset-uri") as HTMLInputElement;
+const mfaResetConfirmForm = document.querySelector("#mfa-reset-confirm-form") as HTMLFormElement;
+const mfaResetCode = document.querySelector("#mfa-reset-code") as HTMLInputElement;
+const mfaResetConfirmMessage = document.querySelector("#mfa-reset-confirm-message") as HTMLParagraphElement;
 const shareForm = document.querySelector("#share-form") as HTMLFormElement;
 const shareCalendar = document.querySelector("#share-calendar") as HTMLSelectElement;
 const shareEmail = document.querySelector("#share-email") as HTMLInputElement;
@@ -249,10 +314,23 @@ navButtons.forEach((button) => {
   });
 });
 
+openLoginDialogButton.addEventListener("click", openLoginDialog);
+openSignupDialogButton.addEventListener("click", openSignupDialog);
+closeLoginDialogButton.addEventListener("click", () => loginDialog.close());
+closeSignupDialogButton.addEventListener("click", () => signupDialog.close());
 loginForm.addEventListener("submit", handleLogin);
+loginMfaForm.addEventListener("submit", handleLoginMfa);
 signupForm.addEventListener("submit", handleSignup);
 mfaForm.addEventListener("submit", handleMfa);
 logoutButton.addEventListener("click", handleLogout);
+adminLogoutButton.addEventListener("click", handleLogout);
+downloadSignupBackupCodesButton.addEventListener("click", () => downloadBackupCodes(state.latestBackupCodes));
+finishSignupButton.addEventListener("click", () => {
+  signupDialog.close();
+  if (state.user) {
+    void loadApp(state.user);
+  }
+});
 
 openEventButtons.forEach((button) => {
   button.addEventListener("click", () => {
@@ -296,6 +374,11 @@ importForm.addEventListener("submit", handleImport);
 importCategoryInput.addEventListener("input", syncImportCategoryColor);
 eventDetailsSetting.addEventListener("change", updateEventDetailsSetting);
 darkModeSetting.addEventListener("change", updateEventDetailsSetting);
+settingsBackupCodesButton.addEventListener("click", handleGenerateBackupCodes);
+openMfaResetButton.addEventListener("click", openMfaResetDialog);
+mfaResetPasswordForm.addEventListener("submit", handleMfaResetStart);
+mfaResetConfirmForm.addEventListener("submit", handleMfaResetConfirm);
+closeMfaResetButton.addEventListener("click", closeMfaResetDialog);
 shareForm.addEventListener("submit", handleShareInvite);
 sharedCalendarForm.addEventListener("submit", handleSharedCalendarCreate);
 
@@ -315,8 +398,20 @@ async function initialize(): Promise<void> {
 
 async function loadApp(user: CurrentUser): Promise<void> {
   state.user = user;
-  userBadge.textContent = `${user.displayName} (${user.email})`;
   authShell.classList.add("hidden");
+  loginDialog.close();
+  signupDialog.close();
+
+  if (user.isAdmin) {
+    appShell.classList.add("hidden");
+    adminShell.classList.remove("hidden");
+    adminUserBadge.textContent = `${user.displayName} (${user.email})`;
+    await refreshAdminSummary();
+    return;
+  }
+
+  userBadge.textContent = `${user.displayName} (${user.email})`;
+  adminShell.classList.add("hidden");
   appShell.classList.remove("hidden");
   await refreshSettings();
   await refreshCategories();
@@ -334,39 +429,73 @@ async function loadApp(user: CurrentUser): Promise<void> {
 function showAuth(session: AuthSessionResponse = { authenticated: false }): void {
   state.user = session.user ?? null;
   appShell.classList.add("hidden");
+  adminShell.classList.add("hidden");
   authShell.classList.remove("hidden");
 
   if (session.mfaSetup) {
     state.mfaMode = "setup";
-    authForms.classList.add("hidden");
+    loginDialog.close();
+    if (!signupDialog.open) {
+      signupDialog.showModal();
+    }
+    signupForm.classList.add("hidden");
     mfaPanel.classList.remove("hidden");
+    backupCodesPanel.classList.add("hidden");
     mfaSecret.value = session.mfaSetup.secret;
     mfaUri.value = session.mfaSetup.setupUri;
-    authMessage.textContent = "Add this key to an authenticator app, then enter the current code.";
-    authMessage.classList.remove("error");
+    setMfaMessage("Add this key to an authenticator app, then enter the current code.");
     mfaCode.focus();
     return;
   }
 
   if (session.mfaRequired) {
     state.mfaMode = "verify";
-    authForms.classList.add("hidden");
-    mfaPanel.classList.remove("hidden");
-    mfaSecret.value = "";
-    mfaUri.value = "";
-    authMessage.textContent = "Enter your authenticator code.";
-    authMessage.classList.remove("error");
-    mfaCode.focus();
+    signupDialog.close();
+    if (!loginDialog.open) {
+      loginDialog.showModal();
+    }
+    loginForm.classList.add("hidden");
+    loginMfaForm.classList.remove("hidden");
+    setLoginMfaMessage("Enter your authenticator or backup code.");
+    loginMfaCode.focus();
     return;
   }
 
-  authForms.classList.remove("hidden");
+  loginForm.classList.remove("hidden");
+  loginMfaForm.classList.add("hidden");
+  signupForm.classList.remove("hidden");
   mfaPanel.classList.add("hidden");
+  backupCodesPanel.classList.add("hidden");
+}
+
+function openLoginDialog(): void {
+  setAuthMessage("");
+  setLoginMessage("");
+  setLoginMfaMessage("");
+  loginForm.classList.remove("hidden");
+  loginMfaForm.classList.add("hidden");
+  if (!loginDialog.open) {
+    loginDialog.showModal();
+  }
+  loginEmail.focus();
+}
+
+function openSignupDialog(): void {
+  setAuthMessage("");
+  setSignupMessage("");
+  setMfaMessage("");
+  signupForm.classList.remove("hidden");
+  mfaPanel.classList.add("hidden");
+  backupCodesPanel.classList.add("hidden");
+  if (!signupDialog.open) {
+    signupDialog.showModal();
+  }
+  signupFirstName.focus();
 }
 
 async function handleLogin(event: SubmitEvent): Promise<void> {
   event.preventDefault();
-  setAuthMessage("");
+  setLoginMessage("");
   try {
     const session = await apiSend<AuthSessionResponse>("/api/auth/login", "POST", {
       email: loginEmail.value.trim(),
@@ -378,13 +507,29 @@ async function handleLogin(event: SubmitEvent): Promise<void> {
       showAuth(session);
     }
   } catch (error) {
-    setAuthMessage(error instanceof Error ? error.message : "Login failed.", true);
+    setLoginMessage(error instanceof Error ? error.message : "Login failed.", true);
+  }
+}
+
+async function handleLoginMfa(event: SubmitEvent): Promise<void> {
+  event.preventDefault();
+  setLoginMfaMessage("");
+  try {
+    const session = await apiSend<AuthSessionResponse>("/api/auth/mfa/verify", "POST", {
+      code: loginMfaCode.value.trim()
+    });
+    loginMfaCode.value = "";
+    if (session.authenticated && session.user) {
+      await loadApp(session.user);
+    }
+  } catch (error) {
+    setLoginMfaMessage(error instanceof Error ? error.message : "Authenticator or backup code failed.", true);
   }
 }
 
 async function handleSignup(event: SubmitEvent): Promise<void> {
   event.preventDefault();
-  setAuthMessage("");
+  setSignupMessage("");
   try {
     const session = await apiSend<AuthSessionResponse>("/api/auth/signup", "POST", {
       firstName: signupFirstName.value.trim(),
@@ -397,24 +542,34 @@ async function handleSignup(event: SubmitEvent): Promise<void> {
     });
     showAuth(session);
   } catch (error) {
-    setAuthMessage(error instanceof Error ? error.message : "Signup failed.", true);
+    setSignupMessage(error instanceof Error ? error.message : "Signup failed.", true);
   }
 }
 
 async function handleMfa(event: SubmitEvent): Promise<void> {
   event.preventDefault();
-  setAuthMessage("");
+  setMfaMessage("");
   try {
     const endpoint = state.mfaMode === "setup" ? "/api/auth/mfa/enable" : "/api/auth/mfa/verify";
     const session = await apiSend<AuthSessionResponse>(endpoint, "POST", {
       code: mfaCode.value.trim()
     });
     mfaCode.value = "";
+    if (session.backupCodes?.length) {
+      state.latestBackupCodes = session.backupCodes;
+      backupCodesOutput.value = session.backupCodes.join("\n");
+      mfaPanel.classList.add("hidden");
+      backupCodesPanel.classList.remove("hidden");
+      if (session.user) {
+        state.user = session.user;
+      }
+      return;
+    }
     if (session.authenticated && session.user) {
       await loadApp(session.user);
     }
   } catch (error) {
-    setAuthMessage(error instanceof Error ? error.message : "Authenticator code failed.", true);
+    setMfaMessage(error instanceof Error ? error.message : "Authenticator code failed.", true);
   }
 }
 
@@ -423,6 +578,9 @@ async function handleLogout(): Promise<void> {
   state.events = [];
   state.categories = [];
   state.shares = null;
+  state.adminSummary = null;
+  adminShell.classList.add("hidden");
+  appShell.classList.add("hidden");
   showAuth();
   closeMenu();
 }
@@ -456,6 +614,12 @@ async function refreshShares(): Promise<void> {
   state.shares = data;
   renderShareCalendarOptions();
   renderShares();
+}
+
+async function refreshAdminSummary(): Promise<void> {
+  const data = await apiGet<AdminSummary>("/api/admin/summary");
+  state.adminSummary = data;
+  renderAdminSummary();
 }
 
 async function updateEventDetailsSetting(): Promise<void> {
@@ -602,6 +766,107 @@ function renderShares(): void {
       await revokeShare(Number((button as HTMLButtonElement).dataset.revokeShare));
     });
   });
+}
+
+function renderAdminSummary(): void {
+  const summary = state.adminSummary;
+  if (!summary) {
+    adminUsers.innerHTML = "";
+    adminPendingInvites.innerHTML = "";
+    return;
+  }
+
+  adminUsers.innerHTML = summary.users.length
+    ? summary.users.map(renderAdminUser).join("")
+    : `<div class="empty-inline">No users yet.</div>`;
+  adminPendingInvites.innerHTML = summary.pendingInvites.length
+    ? summary.pendingInvites.map((invite) => `
+      <article class="share-item">
+        <div>
+          <strong>${escapeHtml(invite.email)}</strong>
+          <span>${invite.inviteCount} pending invitation${invite.inviteCount === 1 ? "" : "s"}</span>
+        </div>
+      </article>
+    `).join("")
+    : `<div class="empty-inline">No pending invited users.</div>`;
+
+  adminUsers.querySelectorAll<HTMLFormElement>("[data-admin-user-form]").forEach((formElement) => {
+    formElement.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      await saveAdminUser(Number(formElement.dataset.userId), formElement);
+    });
+  });
+
+  adminUsers.querySelectorAll<HTMLFormElement>("[data-admin-password-form]").forEach((formElement) => {
+    formElement.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      await resetAdminUserPassword(Number(formElement.dataset.userId), formElement);
+    });
+  });
+
+  adminUsers.querySelectorAll<HTMLButtonElement>("[data-admin-mfa-reset]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      await requireAdminUserMfaReset(Number(button.dataset.adminMfaReset));
+    });
+  });
+}
+
+function renderAdminUser(user: AdminUser): string {
+  const statusParts = [
+    user.isAdmin ? "Admin" : "User",
+    user.mfaEnabled ? "MFA enabled" : "MFA setup required",
+    user.forceMfaSetup ? "Reconfigure required" : ""
+  ].filter(Boolean).join(" - ");
+
+  return `
+    <article class="admin-user-card">
+      <div class="admin-user-heading">
+        <div>
+          <strong>${escapeHtml(user.displayName)}</strong>
+          <span>${escapeHtml(user.email)} - ${escapeHtml(statusParts)}</span>
+        </div>
+      </div>
+      <form class="admin-user-form" data-admin-user-form data-user-id="${user.id}">
+        <div class="form-row">
+          <label>
+            <span>First name</span>
+            <input name="firstName" value="${escapeHtml(user.firstName)}" required>
+          </label>
+          <label>
+            <span>Last name</span>
+            <input name="lastName" value="${escapeHtml(user.lastName)}" required>
+          </label>
+        </div>
+        <div class="form-row">
+          <label>
+            <span>Display name</span>
+            <input name="displayName" value="${escapeHtml(user.displayName)}" required>
+          </label>
+          <label>
+            <span>Email</span>
+            <input name="email" type="email" value="${escapeHtml(user.email)}" required>
+          </label>
+        </div>
+        <label>
+          <span>Date of birth</span>
+          <input name="dateOfBirth" type="date" value="${escapeHtml(user.dateOfBirth)}" required>
+        </label>
+        <button class="button button-primary" type="submit">Save details</button>
+        <p class="form-message" data-admin-user-message></p>
+      </form>
+      <form class="admin-user-form" data-admin-password-form data-user-id="${user.id}">
+        <label>
+          <span>New password</span>
+          <input name="password" type="password" minlength="10" autocomplete="new-password" required>
+        </label>
+        <button class="button button-ghost" type="submit">Reset password</button>
+        <p class="form-message" data-admin-password-message></p>
+      </form>
+      <button class="button button-ghost" type="button" data-admin-mfa-reset="${user.id}">
+        Require MFA reconfiguration
+      </button>
+    </article>
+  `;
 }
 
 function renderIncomingShare(share: ShareItem): string {
@@ -1124,6 +1389,78 @@ async function handleImport(event: SubmitEvent): Promise<void> {
   }
 }
 
+async function handleGenerateBackupCodes(): Promise<void> {
+  setSecurityMessage("");
+  try {
+    const result = await apiSend<{ backupCodes: string[] }>("/api/security/backup-codes", "POST");
+    downloadBackupCodes(result.backupCodes);
+    setSecurityMessage("New backup codes downloaded.");
+  } catch (error) {
+    setSecurityMessage(error instanceof Error ? error.message : "Could not generate backup codes.", true);
+  }
+}
+
+function openMfaResetDialog(): void {
+  setSecurityMessage("");
+  mfaResetPasswordForm.classList.remove("hidden");
+  mfaResetSetup.classList.add("hidden");
+  mfaResetPassword.value = "";
+  mfaResetCode.value = "";
+  mfaResetSecret.value = "";
+  mfaResetUri.value = "";
+  setMfaResetPasswordMessage("");
+  setMfaResetConfirmMessage("");
+  if (!mfaResetDialog.open) {
+    mfaResetDialog.showModal();
+  }
+  mfaResetPassword.focus();
+}
+
+function closeMfaResetDialog(): void {
+  if (mfaResetDialog.open) {
+    mfaResetDialog.close();
+  }
+}
+
+async function handleMfaResetStart(event: SubmitEvent): Promise<void> {
+  event.preventDefault();
+  setMfaResetPasswordMessage("");
+
+  try {
+    const result = await apiSend<{ mfaSetup: { secret: string; setupUri: string } }>(
+      "/api/security/mfa/start-reset",
+      "POST",
+      { password: mfaResetPassword.value }
+    );
+    mfaResetPasswordForm.classList.add("hidden");
+    mfaResetSetup.classList.remove("hidden");
+    mfaResetSecret.value = result.mfaSetup.secret;
+    mfaResetUri.value = result.mfaSetup.setupUri;
+    mfaResetCode.focus();
+  } catch (error) {
+    setMfaResetPasswordMessage(error instanceof Error ? error.message : "Password was not accepted.", true);
+  }
+}
+
+async function handleMfaResetConfirm(event: SubmitEvent): Promise<void> {
+  event.preventDefault();
+  setMfaResetConfirmMessage("");
+
+  try {
+    const result = await apiSend<{ backupCodes: string[]; user: CurrentUser }>(
+      "/api/security/mfa/confirm-reset",
+      "POST",
+      { code: mfaResetCode.value.trim() }
+    );
+    state.user = result.user;
+    downloadBackupCodes(result.backupCodes);
+    closeMfaResetDialog();
+    setSecurityMessage("Authenticator updated and new backup codes downloaded.");
+  } catch (error) {
+    setMfaResetConfirmMessage(error instanceof Error ? error.message : "Authenticator code failed.", true);
+  }
+}
+
 async function handleShareInvite(event: SubmitEvent): Promise<void> {
   event.preventDefault();
   setShareMessage("");
@@ -1160,6 +1497,54 @@ async function handleSharedCalendarCreate(event: SubmitEvent): Promise<void> {
     setSharedCalendarMessage("Shared calendar created.");
   } catch (error) {
     setSharedCalendarMessage(error instanceof Error ? error.message : "Could not create calendar.", true);
+  }
+}
+
+async function saveAdminUser(userId: number, formElement: HTMLFormElement): Promise<void> {
+  const message = formElement.querySelector("[data-admin-user-message]") as HTMLParagraphElement;
+  setInlineMessage(message, "");
+  const formData = new FormData(formElement);
+
+  try {
+    const summary = await apiSend<AdminSummary>(`/api/admin/users/${userId}`, "PUT", {
+      firstName: String(formData.get("firstName") ?? ""),
+      lastName: String(formData.get("lastName") ?? ""),
+      displayName: String(formData.get("displayName") ?? ""),
+      email: String(formData.get("email") ?? ""),
+      dateOfBirth: String(formData.get("dateOfBirth") ?? "")
+    });
+    state.adminSummary = summary;
+    renderAdminSummary();
+  } catch (error) {
+    setInlineMessage(message, error instanceof Error ? error.message : "Could not save user.", true);
+  }
+}
+
+async function resetAdminUserPassword(userId: number, formElement: HTMLFormElement): Promise<void> {
+  const message = formElement.querySelector("[data-admin-password-message]") as HTMLParagraphElement;
+  const passwordInput = formElement.querySelector("input[name='password']") as HTMLInputElement;
+  setInlineMessage(message, "");
+
+  try {
+    const summary = await apiSend<AdminSummary>(`/api/admin/users/${userId}/reset-password`, "POST", {
+      password: passwordInput.value
+    });
+    state.adminSummary = summary;
+    passwordInput.value = "";
+    renderAdminSummary();
+  } catch (error) {
+    setInlineMessage(message, error instanceof Error ? error.message : "Could not reset password.", true);
+  }
+}
+
+async function requireAdminUserMfaReset(userId: number): Promise<void> {
+  try {
+    const summary = await apiSend<AdminSummary>(`/api/admin/users/${userId}/require-mfa-reset`, "POST");
+    state.adminSummary = summary;
+    renderAdminSummary();
+  } catch (error) {
+    authMessage.textContent = error instanceof Error ? error.message : "Could not require MFA reset.";
+    authMessage.classList.add("error");
   }
 }
 
@@ -1533,6 +1918,26 @@ function setAuthMessage(message: string, isError = false): void {
   authMessage.classList.toggle("error", isError);
 }
 
+function setLoginMessage(message: string, isError = false): void {
+  loginMessage.textContent = message;
+  loginMessage.classList.toggle("error", isError);
+}
+
+function setLoginMfaMessage(message: string, isError = false): void {
+  loginMfaMessage.textContent = message;
+  loginMfaMessage.classList.toggle("error", isError);
+}
+
+function setSignupMessage(message: string, isError = false): void {
+  signupMessage.textContent = message;
+  signupMessage.classList.toggle("error", isError);
+}
+
+function setMfaMessage(message: string, isError = false): void {
+  mfaMessage.textContent = message;
+  mfaMessage.classList.toggle("error", isError);
+}
+
 function setMessage(message: string, isError = false): void {
   formMessage.textContent = message;
   formMessage.classList.toggle("error", isError);
@@ -1551,6 +1956,47 @@ function setShareMessage(message: string, isError = false): void {
 function setSharedCalendarMessage(message: string, isError = false): void {
   sharedCalendarMessage.textContent = message;
   sharedCalendarMessage.classList.toggle("error", isError);
+}
+
+function setSecurityMessage(message: string, isError = false): void {
+  securityMessage.textContent = message;
+  securityMessage.classList.toggle("error", isError);
+}
+
+function setMfaResetPasswordMessage(message: string, isError = false): void {
+  mfaResetPasswordMessage.textContent = message;
+  mfaResetPasswordMessage.classList.toggle("error", isError);
+}
+
+function setMfaResetConfirmMessage(message: string, isError = false): void {
+  mfaResetConfirmMessage.textContent = message;
+  mfaResetConfirmMessage.classList.toggle("error", isError);
+}
+
+function setInlineMessage(element: HTMLParagraphElement, message: string, isError = false): void {
+  element.textContent = message;
+  element.classList.toggle("error", isError);
+}
+
+function downloadBackupCodes(codes: string[]): void {
+  if (!codes.length) {
+    return;
+  }
+
+  const body = [
+    "Countdown Calendar backup codes",
+    "Each code can be used once in place of an authenticator code.",
+    "",
+    ...codes
+  ].join("\n");
+  const blob = new Blob([`${body}\n`], { type: "text/plain;charset=utf-8" });
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = "countdown-calendar-backup-codes.txt";
+  document.body.append(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(link.href);
 }
 
 function escapeHtml(value: string): string {

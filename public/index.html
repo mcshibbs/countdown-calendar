@@ -14,82 +14,136 @@
           <h1>Countdown Calendar</h1>
         </div>
 
-        <div id="auth-forms" class="auth-forms">
-          <section class="auth-panel">
-            <h2>Log in</h2>
-            <form id="login-form" class="auth-form">
-              <label>
-                <span>Email address</span>
-                <input id="login-email" name="email" type="email" autocomplete="email" required>
-              </label>
-              <label>
-                <span>Password</span>
-                <input id="login-password" name="password" type="password" autocomplete="current-password" required>
-              </label>
-              <button class="button button-primary full-width" type="submit">Log in</button>
-            </form>
-          </section>
-
-          <section class="auth-panel">
-            <h2>Sign up</h2>
-            <form id="signup-form" class="auth-form">
-              <div class="form-row">
-                <label>
-                  <span>First name</span>
-                  <input id="signup-first-name" name="firstName" autocomplete="given-name" required>
-                </label>
-                <label>
-                  <span>Last name</span>
-                  <input id="signup-last-name" name="lastName" autocomplete="family-name" required>
-                </label>
-              </div>
-              <label>
-                <span>Display name</span>
-                <input id="signup-display-name" name="displayName" autocomplete="nickname" required>
-              </label>
-              <label>
-                <span>Email address</span>
-                <input id="signup-email" name="email" type="email" autocomplete="email" required>
-              </label>
-              <label>
-                <span>Date of birth</span>
-                <input id="signup-date-of-birth" name="dateOfBirth" type="date" required>
-              </label>
-              <div class="form-row">
-                <label>
-                  <span>Password</span>
-                  <input id="signup-password" name="password" type="password" autocomplete="new-password" minlength="10" required>
-                </label>
-                <label>
-                  <span>Confirm password</span>
-                  <input id="signup-confirm-password" name="confirmPassword" type="password" autocomplete="new-password" minlength="10" required>
-                </label>
-              </div>
-              <button class="button button-primary full-width" type="submit">Create account</button>
-            </form>
-          </section>
+        <div class="auth-actions">
+          <button class="button button-primary" id="open-login-dialog" type="button">Log in</button>
+          <button class="button button-ghost" id="open-signup-dialog" type="button">Sign up</button>
         </div>
-
-        <section id="mfa-panel" class="auth-panel mfa-panel hidden">
-          <h2>Authenticator setup</h2>
-          <label>
-            <span>Setup key</span>
-            <input id="mfa-secret" readonly>
-          </label>
-          <label>
-            <span>Setup URI</span>
-            <input id="mfa-uri" readonly>
-          </label>
-          <form id="mfa-form" class="auth-form">
-            <label>
-              <span>6-digit code</span>
-              <input id="mfa-code" name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" required>
-            </label>
-            <button class="button button-primary full-width" type="submit">Verify code</button>
-          </form>
-        </section>
-
         <p id="auth-message" class="form-message" role="status"></p>
+      </div>
+    </section>
+
+    <dialog id="login-dialog" class="auth-dialog" aria-labelledby="login-title">
+      <div class="modal-header">
+        <h2 id="login-title">Log in</h2>
+        <button class="icon-button" id="close-login-dialog" type="button" aria-label="Close">x</button>
+      </div>
+      <form id="login-form" class="auth-form">
+        <label>
+          <span>Email address</span>
+          <input id="login-email" name="email" type="email" autocomplete="email" required>
+        </label>
+        <label>
+          <span>Password</span>
+          <input id="login-password" name="password" type="password" autocomplete="current-password" required>
+        </label>
+        <button class="button button-primary full-width" type="submit">Log in</button>
+        <p id="login-message" class="form-message" role="status"></p>
+      </form>
+      <form id="login-mfa-form" class="auth-form hidden">
+        <label>
+          <span>Authenticator or backup code</span>
+          <input id="login-mfa-code" name="code" autocomplete="one-time-code" required>
+        </label>
+        <button class="button button-primary full-width" type="submit">Verify code</button>
+        <p id="login-mfa-message" class="form-message" role="status"></p>
+      </form>
+    </dialog>
+
+    <dialog id="signup-dialog" class="auth-dialog" aria-labelledby="signup-title">
+      <div class="modal-header">
+        <h2 id="signup-title">Sign up</h2>
+        <button class="icon-button" id="close-signup-dialog" type="button" aria-label="Close">x</button>
+      </div>
+      <form id="signup-form" class="auth-form">
+        <div class="form-row">
+          <label>
+            <span>First name</span>
+            <input id="signup-first-name" name="firstName" autocomplete="given-name" required>
+          </label>
+          <label>
+            <span>Last name</span>
+            <input id="signup-last-name" name="lastName" autocomplete="family-name" required>
+          </label>
+        </div>
+        <label>
+          <span>Display name</span>
+          <input id="signup-display-name" name="displayName" autocomplete="nickname" required>
+        </label>
+        <label>
+          <span>Email address</span>
+          <input id="signup-email" name="email" type="email" autocomplete="email" required>
+        </label>
+        <label>
+          <span>Date of birth</span>
+          <input id="signup-date-of-birth" name="dateOfBirth" type="date" required>
+        </label>
+        <div class="form-row">
+          <label>
+            <span>Password</span>
+            <input id="signup-password" name="password" type="password" autocomplete="new-password" minlength="10" required>
+          </label>
+          <label>
+            <span>Confirm password</span>
+            <input id="signup-confirm-password" name="confirmPassword" type="password" autocomplete="new-password" minlength="10" required>
+          </label>
+        </div>
+        <button class="button button-primary full-width" type="submit">Create account</button>
+        <p id="signup-message" class="form-message" role="status"></p>
+      </form>
+
+      <section id="mfa-panel" class="mfa-panel hidden">
+        <h2>Authenticator setup</h2>
+        <label>
+          <span>Setup key</span>
+          <input id="mfa-secret" readonly>
+        </label>
+        <label>
+          <span>Setup URI</span>
+          <input id="mfa-uri" readonly>
+        </label>
+        <form id="mfa-form" class="auth-form">
+          <label>
+            <span>6-digit code</span>
+            <input id="mfa-code" name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" required>
+          </label>
+          <button class="button button-primary full-width" type="submit">Verify code</button>
+          <p id="mfa-message" class="form-message" role="status"></p>
+        </form>
+      </section>
+
+      <section id="backup-codes-panel" class="mfa-panel hidden">
+        <h2>Backup codes</h2>
+        <textarea id="backup-codes-output" rows="10" readonly></textarea>
+        <div class="action-grid">
+          <button class="button button-primary" id="download-signup-backup-codes" type="button">Download backup codes</button>
+          <button class="button button-ghost" id="finish-signup" type="button">Continue</button>
+        </div>
+      </section>
+    </dialog>
+
+    <section id="admin-shell" class="app-shell hidden">
+      <header class="app-header">
+        <div>
+          <h1>Admin Portal</h1>
+          <p id="admin-user-badge" class="user-badge"></p>
+        </div>
+        <button class="button button-ghost" id="admin-logout-button" type="button">Log out</button>
+      </header>
+      <div class="admin-grid">
+        <section class="settings-panel">
+          <div class="panel-heading">
+            <p class="eyebrow">Accounts</p>
+            <h2>Users</h2>
+          </div>
+          <div id="admin-users" class="admin-list"></div>
+        </section>
+        <section class="settings-panel">
+          <div class="panel-heading">
+            <p class="eyebrow">Invitations</p>
+            <h2>Pending invited users</h2>
+          </div>
+          <div id="admin-pending-invites" class="share-list"></div>
+        </section>
       </div>
     </section>
 
@@ -179,91 +233,6 @@
         <div class="settings-grid">
           <section class="settings-panel">
             <div class="panel-heading">
-              <p class="eyebrow">Display</p>
-              <h2>Event details</h2>
-            </div>
-            <label class="toggle-row">
-              <input id="event-details-setting" type="checkbox" checked>
-              <span>Enable expandable holiday and event details</span>
-            </label>
-            <label class="toggle-row">
-              <input id="dark-mode-setting" type="checkbox">
-              <span>Enable dark mode</span>
-            </label>
-            <p id="settings-message" class="form-message" role="status"></p>
-          </section>
-
-          <section class="settings-panel">
-            <div class="panel-heading">
-              <p class="eyebrow">Data</p>
-              <h2>Export</h2>
-            </div>
-            <div class="action-grid">
-              <a class="button button-ghost" href="/api/export">Export JSON</a>
-              <a class="button button-primary" href="/api/export.db">Download DB</a>
-            </div>
-          </section>
-
-          <section class="settings-panel">
-            <div class="panel-heading">
-              <p class="eyebrow">Sharing</p>
-              <h2>Calendar invitations</h2>
-            </div>
-            <form id="share-form" class="import-form">
-              <label>
-                <span>Calendar</span>
-                <select id="share-calendar" required></select>
-              </label>
-              <label>
-                <span>Email address</span>
-                <input id="share-email" type="email" autocomplete="email" required>
-              </label>
-              <button class="button button-primary full-width" type="submit">Send invitation</button>
-              <p id="share-message" class="form-message" role="status"></p>
-            </form>
-
-            <div class="share-section">
-              <h3>Incoming</h3>
-              <div id="incoming-shares" class="share-list"></div>
-            </div>
-            <div class="share-section">
-              <h3>Shared by me</h3>
-              <div id="outgoing-shares" class="share-list"></div>
-            </div>
-            <div class="share-section">
-              <h3>Shared with me</h3>
-              <div id="accepted-shares" class="share-list"></div>
-            </div>
-          </section>
-
-          <section class="settings-panel">
-            <div class="panel-heading">
-              <p class="eyebrow">Shared</p>
-              <h2>New shared calendar</h2>
-            </div>
-            <form id="shared-calendar-form" class="import-form">
-              <label>
-                <span>Name</span>
-                <input id="shared-calendar-name" maxlength="80" required>
-              </label>
-              <div class="form-row color-row">
-                <label>
-                  <span>Color</span>
-                  <input id="shared-calendar-color" type="color" value="#2563eb">
-                </label>
-                <div class="color-state">Shared calendar</div>
-              </div>
-              <label>
-                <span>Invite email</span>
-                <input id="shared-calendar-email" type="email" autocomplete="email">
-              </label>
-              <button class="button button-primary full-width" type="submit">Create calendar</button>
-              <p id="shared-calendar-message" class="form-message" role="status"></p>
-            </form>
-          </section>
-
-          <section class="settings-panel">
-            <div class="panel-heading">
               <p class="eyebrow">Bulk</p>
               <h2>Import</h2>
             </div>
@@ -300,6 +269,103 @@
               <button class="button button-primary full-width" type="submit">Import events</button>
               <a class="button button-ghost full-width" href="/api/import-template.csv">Download CSV template</a>
               <p id="import-message" class="form-message" role="status"></p>
+            </form>
+          </section>
+
+          <section class="settings-panel">
+            <div class="panel-heading">
+              <p class="eyebrow">Calendar</p>
+              <h2>Invitations</h2>
+            </div>
+            <form id="share-form" class="import-form">
+              <label>
+                <span>Calendar</span>
+                <select id="share-calendar" required></select>
+              </label>
+              <label>
+                <span>Email address</span>
+                <input id="share-email" type="email" autocomplete="email" required>
+              </label>
+              <button class="button button-primary full-width" type="submit">Send invitation</button>
+              <p id="share-message" class="form-message" role="status"></p>
+            </form>
+
+            <div class="share-section">
+              <h3>Incoming</h3>
+              <div id="incoming-shares" class="share-list"></div>
+            </div>
+            <div class="share-section">
+              <h3>Shared by me</h3>
+              <div id="outgoing-shares" class="share-list"></div>
+            </div>
+            <div class="share-section">
+              <h3>Shared with me</h3>
+              <div id="accepted-shares" class="share-list"></div>
+            </div>
+          </section>
+
+          <section class="settings-panel">
+            <div class="panel-heading">
+              <p class="eyebrow">Data</p>
+              <h2>Export</h2>
+            </div>
+            <div class="action-grid">
+              <a class="button button-ghost" href="/api/export">Export JSON</a>
+              <a class="button button-primary" href="/api/export.db">Download DB</a>
+            </div>
+          </section>
+
+          <section class="settings-panel">
+            <div class="panel-heading">
+              <p class="eyebrow">Display</p>
+              <h2>Event details</h2>
+            </div>
+            <label class="toggle-row">
+              <input id="event-details-setting" type="checkbox" checked>
+              <span>Enable expandable holiday and event details</span>
+            </label>
+            <label class="toggle-row">
+              <input id="dark-mode-setting" type="checkbox">
+              <span>Enable dark mode</span>
+            </label>
+            <p id="settings-message" class="form-message" role="status"></p>
+          </section>
+
+          <section class="settings-panel">
+            <div class="panel-heading">
+              <p class="eyebrow">Security</p>
+              <h2>Account security</h2>
+            </div>
+            <div class="action-grid">
+              <button class="button button-primary" id="settings-backup-codes" type="button">Generate backup codes</button>
+              <button class="button button-ghost" id="open-mfa-reset" type="button">Set new authenticator app</button>
+            </div>
+            <p id="security-message" class="form-message" role="status"></p>
+          </section>
+
+          <section class="settings-panel">
+            <div class="panel-heading">
+              <p class="eyebrow">Shared</p>
+              <h2>New shared calendar</h2>
+            </div>
+            <form id="shared-calendar-form" class="import-form">
+              <label>
+                <span>Name</span>
+                <input id="shared-calendar-name" maxlength="80" required>
+              </label>
+              <div class="form-row color-row">
+                <label>
+                  <span>Color</span>
+                  <input id="shared-calendar-color" type="color" value="#2563eb">
+                </label>
+                <div class="color-state">Shared calendar</div>
+              </div>
+              <label>
+                <span>Invite email</span>
+                <input id="shared-calendar-email" type="email" autocomplete="email">
+              </label>
+              <button class="button button-primary full-width" type="submit">Create calendar</button>
+              <p id="shared-calendar-message" class="form-message" role="status"></p>
             </form>
           </section>
         </div>
@@ -383,6 +449,39 @@
           <button class="button button-primary full-width" id="submit-button" type="submit">Add event</button>
           <p id="form-message" class="form-message" role="status"></p>
         </form>
+      </dialog>
+
+      <dialog id="mfa-reset-dialog" class="auth-dialog" aria-labelledby="mfa-reset-title">
+        <div class="modal-header">
+          <h2 id="mfa-reset-title">Set new authenticator app</h2>
+          <button class="icon-button" id="close-mfa-reset" type="button" aria-label="Close">x</button>
+        </div>
+        <form id="mfa-reset-password-form" class="auth-form">
+          <label>
+            <span>Password</span>
+            <input id="mfa-reset-password" type="password" autocomplete="current-password" required>
+          </label>
+          <button class="button button-primary full-width" type="submit">Continue</button>
+          <p id="mfa-reset-password-message" class="form-message" role="status"></p>
+        </form>
+        <section id="mfa-reset-setup" class="mfa-panel hidden">
+          <label>
+            <span>Setup key</span>
+            <input id="mfa-reset-secret" readonly>
+          </label>
+          <label>
+            <span>Setup URI</span>
+            <input id="mfa-reset-uri" readonly>
+          </label>
+          <form id="mfa-reset-confirm-form" class="auth-form">
+            <label>
+              <span>6-digit code</span>
+              <input id="mfa-reset-code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" required>
+            </label>
+            <button class="button button-primary full-width" type="submit">Save authenticator</button>
+            <p id="mfa-reset-confirm-message" class="form-message" role="status"></p>
+          </form>
+        </section>
       </dialog>
     </main>
 

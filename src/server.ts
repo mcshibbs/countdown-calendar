@@ -45,7 +45,10 @@ type UserRow = {
   password_hash: string;
   password_salt: string;
   mfa_secret: string;
+  pending_mfa_secret: string;
   mfa_enabled: number;
+  force_mfa_setup: number;
+  is_admin: number;
   created_at: string;
   updated_at: string;
 };
@@ -81,6 +84,7 @@ type CurrentUser = {
   displayName: string;
   email: string;
   dateOfBirth: string;
+  isAdmin: boolean;
 };
 
 type EventRow = {
@@ -196,9 +200,21 @@ db.exec(`
     password_hash TEXT NOT NULL,
     password_salt TEXT NOT NULL,
     mfa_secret TEXT NOT NULL,
+    pending_mfa_secret TEXT NOT NULL DEFAULT '',
     mfa_enabled INTEGER NOT NULL DEFAULT 0,
+    force_mfa_setup INTEGER NOT NULL DEFAULT 0,
+    is_admin INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS backup_codes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    code_hash TEXT NOT NULL,
+    used_at TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
   );
 
   CREATE TABLE IF NOT EXISTS sessions (
@@ -250,6 +266,7 @@ db.exec(`
 `);
 
 migrateSchema();
+ensureAdminUser();
 ensureDefaultSetting("eventDetailsEnabled", "true");
 ensureDefaultSetting("darkModeEnabled", "false");
 ensureEventIndexes();
@@ -261,6 +278,9 @@ function nowIso(): string {
 
 function migrateSchema(): void {
   migrateCategoriesTable();
+  ensureColumn("users", "pending_mfa_secret", "TEXT NOT NULL DEFAULT ''");
+  ensureColumn("users", "force_mfa_setup", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn("users", "is_admin", "INTEGER NOT NULL DEFAULT 0");
   ensureColumn("events", "details_enabled", "INTEGER NOT NULL DEFAULT 0");
   ensureColumn("events", "detail_start_date", "TEXT NOT NULL DEFAULT ''");
   ensureColumn("events", "recurrence_interval", "INTEGER NOT NULL DEFAULT 1");
@@ -370,6 +390,8 @@ function normalizeCalendarType(value: unknown, name: string, builtin: boolean): 
 function ensureAuthIndexes(): void {
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_categories_owner_user_id ON categories(owner_user_id);
+    CREATE INDEX IF NOT EXISTS idx_backup_codes_user_id ON backup_codes(user_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_backup_codes_user_hash ON backup_codes(user_id, code_hash);
     CREATE INDEX IF NOT EXISTS idx_sessions_token_hash ON sessions(token_hash);
     CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
     CREATE INDEX IF NOT EXISTS idx_calendar_shares_category_id ON calendar_shares(category_id);
@@ -377,6 +399,27 @@ function ensureAuthIndexes(): void {
     CREATE INDEX IF NOT EXISTS idx_calendar_shares_invitee_email ON calendar_shares(invitee_email);
     CREATE INDEX IF NOT EXISTS idx_calendar_shares_owner_user_id ON calendar_shares(owner_user_id);
   `);
+}
+
+function ensureAdminUser(): void {
+  const count = userCount();
+  if (count === 0) {
+    return;
+  }
+
+  const admin = db.prepare("SELECT id FROM users WHERE is_admin = 1 LIMIT 1").get() as
+    | { id: number }
+    | undefined;
+  if (admin) {
+    return;
+  }
+
+  const firstUser = db.prepare("SELECT id FROM users ORDER BY id ASC LIMIT 1").get() as
+    | { id: number }
+    | undefined;
+  if (firstUser) {
+    db.prepare("UPDATE users SET is_admin = 1, updated_at = ? WHERE id = ?").run(nowIso(), firstUser.id);
+  }
 }
 
 function ensureDefaultSetting(key: string, value: string): void {
@@ -509,7 +552,8 @@ function publicUser(user: UserRow): CurrentUser {
     lastName: user.last_name,
     displayName: user.display_name,
     email: user.email,
-    dateOfBirth: user.date_of_birth
+    dateOfBirth: user.date_of_birth,
+    isAdmin: user.is_admin === 1
   };
 }
 
@@ -644,7 +688,10 @@ function getSessionFromRequest(req: IncomingMessage): { user: UserRow; session: 
       password_hash: row.password_hash,
       password_salt: row.password_salt,
       mfa_secret: row.mfa_secret,
+      pending_mfa_secret: row.pending_mfa_secret,
       mfa_enabled: row.mfa_enabled,
+      force_mfa_setup: row.force_mfa_setup,
+      is_admin: row.is_admin,
       created_at: row.created_at,
       updated_at: row.updated_at
     },
@@ -664,7 +711,7 @@ function requireVerifiedSession(req: IncomingMessage): { user: UserRow; session:
   if (!auth) {
     throw httpError(401, "Log in to continue.");
   }
-  if (auth.user.mfa_enabled !== 1) {
+  if (auth.user.mfa_enabled !== 1 || auth.user.force_mfa_setup === 1) {
     throw httpError(401, "Finish MFA setup to continue.");
   }
   if (auth.session.mfa_verified !== 1) {
@@ -688,10 +735,10 @@ function userCount(): number {
   return row.count;
 }
 
-function mfaSetupPayload(user: UserRow) {
+function mfaSetupPayload(user: UserRow, secret = user.mfa_secret) {
   const label = `${appIssuer}:${user.email}`;
   const query = new URLSearchParams({
-    secret: user.mfa_secret,
+    secret,
     issuer: appIssuer,
     algorithm: "SHA1",
     digits: "6",
@@ -699,7 +746,7 @@ function mfaSetupPayload(user: UserRow) {
   });
 
   return {
-    secret: user.mfa_secret,
+    secret,
     setupUri: `otpauth://totp/${encodeURIComponent(label)}?${query.toString()}`
   };
 }
@@ -782,6 +829,60 @@ function verifyTotp(secret: string, code: string): boolean {
     }
   }
   return false;
+}
+
+function normalizeBackupCode(code: string): string {
+  return code.trim().toUpperCase().replace(/[^A-Z2-7]/g, "");
+}
+
+function formatBackupCode(raw: string): string {
+  return raw.match(/.{1,5}/g)?.join("-") ?? raw;
+}
+
+function generateBackupCode(): string {
+  return formatBackupCode(base32Encode(randomBytes(10)).slice(0, 15));
+}
+
+function hashBackupCode(userId: number, code: string): string {
+  return createHash("sha256").update(`${userId}:${normalizeBackupCode(code)}`).digest("hex");
+}
+
+function replaceBackupCodes(userId: number): string[] {
+  const codes = Array.from({ length: 10 }, generateBackupCode);
+  db.prepare("DELETE FROM backup_codes WHERE user_id = ?").run(userId);
+
+  const insert = db.prepare(
+    "INSERT INTO backup_codes (user_id, code_hash, created_at) VALUES (?, ?, ?)"
+  );
+  for (const code of codes) {
+    insert.run(userId, hashBackupCode(userId, code), nowIso());
+  }
+
+  return codes;
+}
+
+function consumeBackupCode(userId: number, code: string): boolean {
+  const normalized = normalizeBackupCode(code);
+  if (normalized.length < 10) {
+    return false;
+  }
+
+  const result = db.prepare(
+    `
+    UPDATE backup_codes
+    SET used_at = ?
+    WHERE user_id = ? AND code_hash = ? AND used_at IS NULL
+  `
+  ).run(nowIso(), userId, hashBackupCode(userId, normalized));
+
+  return result.changes > 0;
+}
+
+function verifyMfaOrBackupCode(user: UserRow, code: string): boolean {
+  if (verifyTotp(user.mfa_secret, code)) {
+    return true;
+  }
+  return consumeBackupCode(user.id, code);
 }
 
 function ensureUserDefaultCalendars(userId: number): void {
@@ -1504,7 +1605,7 @@ async function handleAuthApi(req: IncomingMessage, res: ServerResponse, url: URL
       return true;
     }
 
-    if (auth.user.mfa_enabled !== 1) {
+    if (auth.user.mfa_enabled !== 1 || auth.user.force_mfa_setup === 1) {
       sendJson(res, 200, {
         authenticated: false,
         mfaSetup: mfaSetupPayload(auth.user),
@@ -1542,10 +1643,11 @@ async function handleAuthApi(req: IncomingMessage, res: ServerResponse, url: URL
   if (method === "POST" && url.pathname === "/api/auth/login") {
     const body = await readJson(req);
     const user = validateLogin(body);
-    const session = createSession(user.id, user.mfa_enabled !== 1);
+    const needsMfaSetup = user.mfa_enabled !== 1 || user.force_mfa_setup === 1;
+    const session = createSession(user.id, needsMfaSetup);
     setSessionCookie(res, session.token, session.expiresAt);
 
-    if (user.mfa_enabled === 1) {
+    if (!needsMfaSetup) {
       sendJson(res, 200, {
         authenticated: false,
         mfaRequired: true,
@@ -1572,14 +1674,15 @@ async function handleAuthApi(req: IncomingMessage, res: ServerResponse, url: URL
       throw httpError(400, "Authenticator code was not accepted.");
     }
 
-    db.prepare("UPDATE users SET mfa_enabled = 1, updated_at = ? WHERE id = ?")
+    const backupCodes = replaceBackupCodes(auth.user.id);
+    db.prepare("UPDATE users SET mfa_enabled = 1, force_mfa_setup = 0, updated_at = ? WHERE id = ?")
       .run(nowIso(), auth.user.id);
     db.prepare("UPDATE sessions SET mfa_verified = 1 WHERE id = ?").run(auth.session.id);
     const user = getUserById(auth.user.id);
     if (!user) {
       throw httpError(500, "User could not be loaded.");
     }
-    sendJson(res, 200, { authenticated: true, user: publicUser(user) });
+    sendJson(res, 200, { authenticated: true, user: publicUser(user), backupCodes });
     return true;
   }
 
@@ -1590,7 +1693,7 @@ async function handleAuthApi(req: IncomingMessage, res: ServerResponse, url: URL
     }
     const body = await readJson(req);
     const code = cleanText((body as Record<string, unknown>)?.code, 20, true);
-    if (!verifyTotp(auth.user.mfa_secret, code)) {
+    if (!verifyMfaOrBackupCode(auth.user, code)) {
       throw httpError(400, "Authenticator code was not accepted.");
     }
 
@@ -1649,8 +1752,8 @@ function createUserAccount(body: unknown): { user: UserRow } {
   const result = db.prepare(
     `
     INSERT INTO users
-      (first_name, last_name, display_name, email, date_of_birth, password_hash, password_salt, mfa_secret, mfa_enabled, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+      (first_name, last_name, display_name, email, date_of_birth, password_hash, password_salt, mfa_secret, pending_mfa_secret, mfa_enabled, force_mfa_setup, is_admin, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', 0, 0, ?, ?, ?)
   `
   ).run(
     firstName,
@@ -1661,6 +1764,7 @@ function createUserAccount(body: unknown): { user: UserRow } {
     passwordData.hash,
     passwordData.salt,
     generateMfaSecret(),
+    firstUser ? 1 : 0,
     nowIso(),
     nowIso()
   );
@@ -1694,6 +1798,207 @@ function validateLogin(body: unknown): UserRow {
   return user;
 }
 
+function requireAdmin(user: UserRow): void {
+  if (user.is_admin !== 1) {
+    throw httpError(403, "Admin access is required.");
+  }
+}
+
+function generateUserBackupCodes(user: UserRow) {
+  return { backupCodes: replaceBackupCodes(user.id) };
+}
+
+function startMfaReset(body: unknown, user: UserRow) {
+  if (!isRecord(body)) {
+    throw httpError(400, "Expected a JSON object.");
+  }
+
+  const password = cleanText(body.password, 500);
+  if (!verifyPassword(password, user)) {
+    throw httpError(401, "Password was not accepted.");
+  }
+
+  const pendingSecret = generateMfaSecret();
+  db.prepare("UPDATE users SET pending_mfa_secret = ?, updated_at = ? WHERE id = ?")
+    .run(pendingSecret, nowIso(), user.id);
+
+  return { mfaSetup: mfaSetupPayload(user, pendingSecret) };
+}
+
+function confirmMfaReset(body: unknown, user: UserRow) {
+  if (!isRecord(body)) {
+    throw httpError(400, "Expected a JSON object.");
+  }
+
+  const current = getUserById(user.id);
+  if (!current?.pending_mfa_secret) {
+    throw httpError(400, "Start authenticator setup first.");
+  }
+
+  const code = cleanText(body.code, 20, true);
+  if (!verifyTotp(current.pending_mfa_secret, code)) {
+    throw httpError(400, "Authenticator code was not accepted.");
+  }
+
+  const backupCodes = replaceBackupCodes(user.id);
+  db.prepare(
+    `
+    UPDATE users
+    SET mfa_secret = ?, pending_mfa_secret = '', mfa_enabled = 1, force_mfa_setup = 0, updated_at = ?
+    WHERE id = ?
+  `
+  ).run(current.pending_mfa_secret, nowIso(), user.id);
+
+  return { backupCodes, user: publicUser(getUserById(user.id) ?? current) };
+}
+
+function adminSummary() {
+  const users = db
+    .prepare(
+      `
+      SELECT id, first_name, last_name, display_name, email, date_of_birth, mfa_enabled, force_mfa_setup, is_admin, created_at, updated_at
+      FROM users
+      ORDER BY display_name COLLATE NOCASE ASC, email COLLATE NOCASE ASC
+    `
+    )
+    .all() as Array<{
+      id: number;
+      first_name: string;
+      last_name: string;
+      display_name: string;
+      email: string;
+      date_of_birth: string;
+      mfa_enabled: number;
+      force_mfa_setup: number;
+      is_admin: number;
+      created_at: string;
+      updated_at: string;
+    }>;
+
+  const pendingInvites = db
+    .prepare(
+      `
+      SELECT
+        s.invitee_email,
+        COUNT(*) AS invite_count,
+        MAX(s.updated_at) AS updated_at
+      FROM calendar_shares s
+      LEFT JOIN users u ON u.email = s.invitee_email
+      WHERE s.status = 'pending' AND u.id IS NULL
+      GROUP BY s.invitee_email
+      ORDER BY s.invitee_email COLLATE NOCASE ASC
+    `
+    )
+    .all() as Array<{ invitee_email: string; invite_count: number; updated_at: string }>;
+
+  return {
+    users: users.map((user) => ({
+      id: user.id,
+      firstName: user.first_name,
+      lastName: user.last_name,
+      displayName: user.display_name,
+      email: user.email,
+      dateOfBirth: user.date_of_birth,
+      mfaEnabled: user.mfa_enabled === 1,
+      forceMfaSetup: user.force_mfa_setup === 1,
+      isAdmin: user.is_admin === 1,
+      createdAt: user.created_at,
+      updatedAt: user.updated_at
+    })),
+    pendingInvites: pendingInvites.map((invite) => ({
+      email: invite.invitee_email,
+      inviteCount: invite.invite_count,
+      updatedAt: invite.updated_at
+    }))
+  };
+}
+
+function updateUserAsAdmin(userId: number, body: unknown) {
+  if (!isRecord(body)) {
+    throw httpError(400, "Expected a JSON object.");
+  }
+
+  const existing = getUserById(userId);
+  if (!existing) {
+    throw httpError(404, "User not found.");
+  }
+
+  const firstName = cleanText(body.firstName, 80);
+  const lastName = cleanText(body.lastName, 80);
+  const displayName = cleanText(body.displayName, 80);
+  const email = normalizeEmail(cleanText(body.email, 160));
+  const dateOfBirth = cleanText(body.dateOfBirth, 10);
+
+  if (!firstName || !lastName || !displayName) {
+    throw httpError(400, "Name fields are required.");
+  }
+  if (!validateEmail(email)) {
+    throw httpError(400, "Enter a valid email address.");
+  }
+  if (!isValidDateOnly(dateOfBirth)) {
+    throw httpError(400, "Date of birth must be in YYYY-MM-DD format.");
+  }
+
+  const duplicate = getUserByEmail(email);
+  if (duplicate && duplicate.id !== userId) {
+    throw httpError(409, "Another account already uses that email.");
+  }
+
+  db.prepare(
+    `
+    UPDATE users
+    SET first_name = ?, last_name = ?, display_name = ?, email = ?, date_of_birth = ?, updated_at = ?
+    WHERE id = ?
+  `
+  ).run(firstName, lastName, displayName, email, dateOfBirth, nowIso(), userId);
+
+  const updated = getUserById(userId);
+  if (updated) {
+    attachPendingSharesToUser(updated);
+  }
+  return adminSummary();
+}
+
+function resetUserPasswordAsAdmin(userId: number, body: unknown) {
+  if (!isRecord(body)) {
+    throw httpError(400, "Expected a JSON object.");
+  }
+
+  const user = getUserById(userId);
+  if (!user) {
+    throw httpError(404, "User not found.");
+  }
+
+  const password = cleanText(body.password, 500);
+  if (password.length < 10) {
+    throw httpError(400, "Password must be at least 10 characters.");
+  }
+
+  const passwordData = hashPassword(password);
+  db.prepare("UPDATE users SET password_hash = ?, password_salt = ?, updated_at = ? WHERE id = ?")
+    .run(passwordData.hash, passwordData.salt, nowIso(), userId);
+  db.prepare("DELETE FROM sessions WHERE user_id = ?").run(userId);
+  return adminSummary();
+}
+
+function requireUserMfaResetAsAdmin(userId: number) {
+  const user = getUserById(userId);
+  if (!user) {
+    throw httpError(404, "User not found.");
+  }
+
+  db.prepare(
+    `
+    UPDATE users
+    SET mfa_secret = ?, pending_mfa_secret = '', mfa_enabled = 0, force_mfa_setup = 1, updated_at = ?
+    WHERE id = ?
+  `
+  ).run(generateMfaSecret(), nowIso(), userId);
+  db.prepare("DELETE FROM sessions WHERE user_id = ?").run(userId);
+  db.prepare("DELETE FROM backup_codes WHERE user_id = ?").run(userId);
+  return adminSummary();
+}
+
 async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
   const method = req.method ?? "GET";
 
@@ -1720,6 +2025,52 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
 
   const auth = requireVerifiedSession(req);
   const user = auth.user;
+
+  if (method === "POST" && url.pathname === "/api/security/backup-codes") {
+    sendJson(res, 200, generateUserBackupCodes(user));
+    return;
+  }
+
+  if (method === "POST" && url.pathname === "/api/security/mfa/start-reset") {
+    const body = await readJson(req);
+    sendJson(res, 200, startMfaReset(body, user));
+    return;
+  }
+
+  if (method === "POST" && url.pathname === "/api/security/mfa/confirm-reset") {
+    const body = await readJson(req);
+    sendJson(res, 200, confirmMfaReset(body, user));
+    return;
+  }
+
+  if (url.pathname.startsWith("/api/admin")) {
+    requireAdmin(user);
+
+    if (method === "GET" && url.pathname === "/api/admin/summary") {
+      sendJson(res, 200, adminSummary());
+      return;
+    }
+
+    const userMatch = url.pathname.match(/^\/api\/admin\/users\/(\d+)$/);
+    if (userMatch && method === "PUT") {
+      const body = await readJson(req);
+      sendJson(res, 200, updateUserAsAdmin(Number(userMatch[1]), body));
+      return;
+    }
+
+    const passwordMatch = url.pathname.match(/^\/api\/admin\/users\/(\d+)\/reset-password$/);
+    if (passwordMatch && method === "POST") {
+      const body = await readJson(req);
+      sendJson(res, 200, resetUserPasswordAsAdmin(Number(passwordMatch[1]), body));
+      return;
+    }
+
+    const mfaMatch = url.pathname.match(/^\/api\/admin\/users\/(\d+)\/require-mfa-reset$/);
+    if (mfaMatch && method === "POST") {
+      sendJson(res, 200, requireUserMfaResetAsAdmin(Number(mfaMatch[1])));
+      return;
+    }
+  }
 
   if (method === "GET" && url.pathname === "/api/categories") {
     const categories = listVisibleCategories(user);

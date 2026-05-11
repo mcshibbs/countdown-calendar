@@ -14,18 +14,30 @@ const state = {
     calendarCursor: startOfToday(),
     user: null,
     mfaMode: "setup",
-    shares: null
+    shares: null,
+    adminSummary: null,
+    latestBackupCodes: []
 };
 const navButtons = Array.from(document.querySelectorAll("[data-view-target]"));
 const openEventButtons = Array.from(document.querySelectorAll("[data-open-event-modal]"));
 const views = Array.from(document.querySelectorAll(".view"));
 const authShell = document.querySelector("#auth-shell");
 const appShell = document.querySelector("#app-shell");
-const authForms = document.querySelector("#auth-forms");
+const adminShell = document.querySelector("#admin-shell");
+const openLoginDialogButton = document.querySelector("#open-login-dialog");
+const openSignupDialogButton = document.querySelector("#open-signup-dialog");
+const loginDialog = document.querySelector("#login-dialog");
+const signupDialog = document.querySelector("#signup-dialog");
+const closeLoginDialogButton = document.querySelector("#close-login-dialog");
+const closeSignupDialogButton = document.querySelector("#close-signup-dialog");
 const loginForm = document.querySelector("#login-form");
+const loginMfaForm = document.querySelector("#login-mfa-form");
 const signupForm = document.querySelector("#signup-form");
 const loginEmail = document.querySelector("#login-email");
 const loginPassword = document.querySelector("#login-password");
+const loginMessage = document.querySelector("#login-message");
+const loginMfaCode = document.querySelector("#login-mfa-code");
+const loginMfaMessage = document.querySelector("#login-mfa-message");
 const signupFirstName = document.querySelector("#signup-first-name");
 const signupLastName = document.querySelector("#signup-last-name");
 const signupDisplayName = document.querySelector("#signup-display-name");
@@ -33,15 +45,25 @@ const signupEmail = document.querySelector("#signup-email");
 const signupDateOfBirth = document.querySelector("#signup-date-of-birth");
 const signupPassword = document.querySelector("#signup-password");
 const signupConfirmPassword = document.querySelector("#signup-confirm-password");
+const signupMessage = document.querySelector("#signup-message");
 const mfaPanel = document.querySelector("#mfa-panel");
 const mfaForm = document.querySelector("#mfa-form");
 const mfaSecret = document.querySelector("#mfa-secret");
 const mfaUri = document.querySelector("#mfa-uri");
 const mfaCode = document.querySelector("#mfa-code");
+const mfaMessage = document.querySelector("#mfa-message");
+const backupCodesPanel = document.querySelector("#backup-codes-panel");
+const backupCodesOutput = document.querySelector("#backup-codes-output");
+const downloadSignupBackupCodesButton = document.querySelector("#download-signup-backup-codes");
+const finishSignupButton = document.querySelector("#finish-signup");
 const authMessage = document.querySelector("#auth-message");
 const navMenu = document.querySelector("#nav-menu");
 const userBadge = document.querySelector("#user-badge");
 const logoutButton = document.querySelector("#logout-button");
+const adminUserBadge = document.querySelector("#admin-user-badge");
+const adminLogoutButton = document.querySelector("#admin-logout-button");
+const adminUsers = document.querySelector("#admin-users");
+const adminPendingInvites = document.querySelector("#admin-pending-invites");
 const eventDialog = document.querySelector("#event-dialog");
 const closeEventModalButton = document.querySelector("#close-event-modal");
 const form = document.querySelector("#event-form");
@@ -86,6 +108,20 @@ const importMessage = document.querySelector("#import-message");
 const eventDetailsSetting = document.querySelector("#event-details-setting");
 const darkModeSetting = document.querySelector("#dark-mode-setting");
 const settingsMessage = document.querySelector("#settings-message");
+const settingsBackupCodesButton = document.querySelector("#settings-backup-codes");
+const openMfaResetButton = document.querySelector("#open-mfa-reset");
+const securityMessage = document.querySelector("#security-message");
+const mfaResetDialog = document.querySelector("#mfa-reset-dialog");
+const closeMfaResetButton = document.querySelector("#close-mfa-reset");
+const mfaResetPasswordForm = document.querySelector("#mfa-reset-password-form");
+const mfaResetPassword = document.querySelector("#mfa-reset-password");
+const mfaResetPasswordMessage = document.querySelector("#mfa-reset-password-message");
+const mfaResetSetup = document.querySelector("#mfa-reset-setup");
+const mfaResetSecret = document.querySelector("#mfa-reset-secret");
+const mfaResetUri = document.querySelector("#mfa-reset-uri");
+const mfaResetConfirmForm = document.querySelector("#mfa-reset-confirm-form");
+const mfaResetCode = document.querySelector("#mfa-reset-code");
+const mfaResetConfirmMessage = document.querySelector("#mfa-reset-confirm-message");
 const shareForm = document.querySelector("#share-form");
 const shareCalendar = document.querySelector("#share-calendar");
 const shareEmail = document.querySelector("#share-email");
@@ -126,10 +162,23 @@ navButtons.forEach((button)=>{
         closeMenu();
     });
 });
+openLoginDialogButton.addEventListener("click", openLoginDialog);
+openSignupDialogButton.addEventListener("click", openSignupDialog);
+closeLoginDialogButton.addEventListener("click", ()=>loginDialog.close());
+closeSignupDialogButton.addEventListener("click", ()=>signupDialog.close());
 loginForm.addEventListener("submit", handleLogin);
+loginMfaForm.addEventListener("submit", handleLoginMfa);
 signupForm.addEventListener("submit", handleSignup);
 mfaForm.addEventListener("submit", handleMfa);
 logoutButton.addEventListener("click", handleLogout);
+adminLogoutButton.addEventListener("click", handleLogout);
+downloadSignupBackupCodesButton.addEventListener("click", ()=>downloadBackupCodes(state.latestBackupCodes));
+finishSignupButton.addEventListener("click", ()=>{
+    signupDialog.close();
+    if (state.user) {
+        void loadApp(state.user);
+    }
+});
 openEventButtons.forEach((button)=>{
     button.addEventListener("click", ()=>{
         showView("home");
@@ -170,6 +219,11 @@ importForm.addEventListener("submit", handleImport);
 importCategoryInput.addEventListener("input", syncImportCategoryColor);
 eventDetailsSetting.addEventListener("change", updateEventDetailsSetting);
 darkModeSetting.addEventListener("change", updateEventDetailsSetting);
+settingsBackupCodesButton.addEventListener("click", handleGenerateBackupCodes);
+openMfaResetButton.addEventListener("click", openMfaResetDialog);
+mfaResetPasswordForm.addEventListener("submit", handleMfaResetStart);
+mfaResetConfirmForm.addEventListener("submit", handleMfaResetConfirm);
+closeMfaResetButton.addEventListener("click", closeMfaResetDialog);
 shareForm.addEventListener("submit", handleShareInvite);
 sharedCalendarForm.addEventListener("submit", handleSharedCalendarCreate);
 void initialize();
@@ -185,8 +239,18 @@ async function initialize() {
 }
 async function loadApp(user) {
     state.user = user;
-    userBadge.textContent = `${user.displayName} (${user.email})`;
     authShell.classList.add("hidden");
+    loginDialog.close();
+    signupDialog.close();
+    if (user.isAdmin) {
+        appShell.classList.add("hidden");
+        adminShell.classList.remove("hidden");
+        adminUserBadge.textContent = `${user.displayName} (${user.email})`;
+        await refreshAdminSummary();
+        return;
+    }
+    userBadge.textContent = `${user.displayName} (${user.email})`;
+    adminShell.classList.add("hidden");
     appShell.classList.remove("hidden");
     await refreshSettings();
     await refreshCategories();
@@ -204,35 +268,67 @@ function showAuth(session = {
 }) {
     state.user = session.user ?? null;
     appShell.classList.add("hidden");
+    adminShell.classList.add("hidden");
     authShell.classList.remove("hidden");
     if (session.mfaSetup) {
         state.mfaMode = "setup";
-        authForms.classList.add("hidden");
+        loginDialog.close();
+        if (!signupDialog.open) {
+            signupDialog.showModal();
+        }
+        signupForm.classList.add("hidden");
         mfaPanel.classList.remove("hidden");
+        backupCodesPanel.classList.add("hidden");
         mfaSecret.value = session.mfaSetup.secret;
         mfaUri.value = session.mfaSetup.setupUri;
-        authMessage.textContent = "Add this key to an authenticator app, then enter the current code.";
-        authMessage.classList.remove("error");
+        setMfaMessage("Add this key to an authenticator app, then enter the current code.");
         mfaCode.focus();
         return;
     }
     if (session.mfaRequired) {
         state.mfaMode = "verify";
-        authForms.classList.add("hidden");
-        mfaPanel.classList.remove("hidden");
-        mfaSecret.value = "";
-        mfaUri.value = "";
-        authMessage.textContent = "Enter your authenticator code.";
-        authMessage.classList.remove("error");
-        mfaCode.focus();
+        signupDialog.close();
+        if (!loginDialog.open) {
+            loginDialog.showModal();
+        }
+        loginForm.classList.add("hidden");
+        loginMfaForm.classList.remove("hidden");
+        setLoginMfaMessage("Enter your authenticator or backup code.");
+        loginMfaCode.focus();
         return;
     }
-    authForms.classList.remove("hidden");
+    loginForm.classList.remove("hidden");
+    loginMfaForm.classList.add("hidden");
+    signupForm.classList.remove("hidden");
     mfaPanel.classList.add("hidden");
+    backupCodesPanel.classList.add("hidden");
+}
+function openLoginDialog() {
+    setAuthMessage("");
+    setLoginMessage("");
+    setLoginMfaMessage("");
+    loginForm.classList.remove("hidden");
+    loginMfaForm.classList.add("hidden");
+    if (!loginDialog.open) {
+        loginDialog.showModal();
+    }
+    loginEmail.focus();
+}
+function openSignupDialog() {
+    setAuthMessage("");
+    setSignupMessage("");
+    setMfaMessage("");
+    signupForm.classList.remove("hidden");
+    mfaPanel.classList.add("hidden");
+    backupCodesPanel.classList.add("hidden");
+    if (!signupDialog.open) {
+        signupDialog.showModal();
+    }
+    signupFirstName.focus();
 }
 async function handleLogin(event) {
     event.preventDefault();
-    setAuthMessage("");
+    setLoginMessage("");
     try {
         const session = await apiSend("/api/auth/login", "POST", {
             email: loginEmail.value.trim(),
@@ -244,12 +340,27 @@ async function handleLogin(event) {
             showAuth(session);
         }
     } catch (error) {
-        setAuthMessage(error instanceof Error ? error.message : "Login failed.", true);
+        setLoginMessage(error instanceof Error ? error.message : "Login failed.", true);
+    }
+}
+async function handleLoginMfa(event) {
+    event.preventDefault();
+    setLoginMfaMessage("");
+    try {
+        const session = await apiSend("/api/auth/mfa/verify", "POST", {
+            code: loginMfaCode.value.trim()
+        });
+        loginMfaCode.value = "";
+        if (session.authenticated && session.user) {
+            await loadApp(session.user);
+        }
+    } catch (error) {
+        setLoginMfaMessage(error instanceof Error ? error.message : "Authenticator or backup code failed.", true);
     }
 }
 async function handleSignup(event) {
     event.preventDefault();
-    setAuthMessage("");
+    setSignupMessage("");
     try {
         const session = await apiSend("/api/auth/signup", "POST", {
             firstName: signupFirstName.value.trim(),
@@ -262,23 +373,33 @@ async function handleSignup(event) {
         });
         showAuth(session);
     } catch (error) {
-        setAuthMessage(error instanceof Error ? error.message : "Signup failed.", true);
+        setSignupMessage(error instanceof Error ? error.message : "Signup failed.", true);
     }
 }
 async function handleMfa(event) {
     event.preventDefault();
-    setAuthMessage("");
+    setMfaMessage("");
     try {
         const endpoint = state.mfaMode === "setup" ? "/api/auth/mfa/enable" : "/api/auth/mfa/verify";
         const session = await apiSend(endpoint, "POST", {
             code: mfaCode.value.trim()
         });
         mfaCode.value = "";
+        if (session.backupCodes?.length) {
+            state.latestBackupCodes = session.backupCodes;
+            backupCodesOutput.value = session.backupCodes.join("\n");
+            mfaPanel.classList.add("hidden");
+            backupCodesPanel.classList.remove("hidden");
+            if (session.user) {
+                state.user = session.user;
+            }
+            return;
+        }
         if (session.authenticated && session.user) {
             await loadApp(session.user);
         }
     } catch (error) {
-        setAuthMessage(error instanceof Error ? error.message : "Authenticator code failed.", true);
+        setMfaMessage(error instanceof Error ? error.message : "Authenticator code failed.", true);
     }
 }
 async function handleLogout() {
@@ -286,6 +407,9 @@ async function handleLogout() {
     state.events = [];
     state.categories = [];
     state.shares = null;
+    state.adminSummary = null;
+    adminShell.classList.add("hidden");
+    appShell.classList.add("hidden");
     showAuth();
     closeMenu();
 }
@@ -315,6 +439,11 @@ async function refreshShares() {
     state.shares = data;
     renderShareCalendarOptions();
     renderShares();
+}
+async function refreshAdminSummary() {
+    const data = await apiGet("/api/admin/summary");
+    state.adminSummary = data;
+    renderAdminSummary();
 }
 async function updateEventDetailsSetting() {
     try {
@@ -424,6 +553,96 @@ function renderShares() {
             await revokeShare(Number(button.dataset.revokeShare));
         });
     });
+}
+function renderAdminSummary() {
+    const summary = state.adminSummary;
+    if (!summary) {
+        adminUsers.innerHTML = "";
+        adminPendingInvites.innerHTML = "";
+        return;
+    }
+    adminUsers.innerHTML = summary.users.length ? summary.users.map(renderAdminUser).join("") : `<div class="empty-inline">No users yet.</div>`;
+    adminPendingInvites.innerHTML = summary.pendingInvites.length ? summary.pendingInvites.map((invite)=>`
+      <article class="share-item">
+        <div>
+          <strong>${escapeHtml(invite.email)}</strong>
+          <span>${invite.inviteCount} pending invitation${invite.inviteCount === 1 ? "" : "s"}</span>
+        </div>
+      </article>
+    `).join("") : `<div class="empty-inline">No pending invited users.</div>`;
+    adminUsers.querySelectorAll("[data-admin-user-form]").forEach((formElement)=>{
+        formElement.addEventListener("submit", async (event)=>{
+            event.preventDefault();
+            await saveAdminUser(Number(formElement.dataset.userId), formElement);
+        });
+    });
+    adminUsers.querySelectorAll("[data-admin-password-form]").forEach((formElement)=>{
+        formElement.addEventListener("submit", async (event)=>{
+            event.preventDefault();
+            await resetAdminUserPassword(Number(formElement.dataset.userId), formElement);
+        });
+    });
+    adminUsers.querySelectorAll("[data-admin-mfa-reset]").forEach((button)=>{
+        button.addEventListener("click", async ()=>{
+            await requireAdminUserMfaReset(Number(button.dataset.adminMfaReset));
+        });
+    });
+}
+function renderAdminUser(user) {
+    const statusParts = [
+        user.isAdmin ? "Admin" : "User",
+        user.mfaEnabled ? "MFA enabled" : "MFA setup required",
+        user.forceMfaSetup ? "Reconfigure required" : ""
+    ].filter(Boolean).join(" - ");
+    return `
+    <article class="admin-user-card">
+      <div class="admin-user-heading">
+        <div>
+          <strong>${escapeHtml(user.displayName)}</strong>
+          <span>${escapeHtml(user.email)} - ${escapeHtml(statusParts)}</span>
+        </div>
+      </div>
+      <form class="admin-user-form" data-admin-user-form data-user-id="${user.id}">
+        <div class="form-row">
+          <label>
+            <span>First name</span>
+            <input name="firstName" value="${escapeHtml(user.firstName)}" required>
+          </label>
+          <label>
+            <span>Last name</span>
+            <input name="lastName" value="${escapeHtml(user.lastName)}" required>
+          </label>
+        </div>
+        <div class="form-row">
+          <label>
+            <span>Display name</span>
+            <input name="displayName" value="${escapeHtml(user.displayName)}" required>
+          </label>
+          <label>
+            <span>Email</span>
+            <input name="email" type="email" value="${escapeHtml(user.email)}" required>
+          </label>
+        </div>
+        <label>
+          <span>Date of birth</span>
+          <input name="dateOfBirth" type="date" value="${escapeHtml(user.dateOfBirth)}" required>
+        </label>
+        <button class="button button-primary" type="submit">Save details</button>
+        <p class="form-message" data-admin-user-message></p>
+      </form>
+      <form class="admin-user-form" data-admin-password-form data-user-id="${user.id}">
+        <label>
+          <span>New password</span>
+          <input name="password" type="password" minlength="10" autocomplete="new-password" required>
+        </label>
+        <button class="button button-ghost" type="submit">Reset password</button>
+        <p class="form-message" data-admin-password-message></p>
+      </form>
+      <button class="button button-ghost" type="button" data-admin-mfa-reset="${user.id}">
+        Require MFA reconfiguration
+      </button>
+    </article>
+  `;
 }
 function renderIncomingShare(share) {
     return `
@@ -852,6 +1071,67 @@ async function handleImport(event) {
         setImportMessage(error instanceof Error ? error.message : "Import failed.", true);
     }
 }
+async function handleGenerateBackupCodes() {
+    setSecurityMessage("");
+    try {
+        const result = await apiSend("/api/security/backup-codes", "POST");
+        downloadBackupCodes(result.backupCodes);
+        setSecurityMessage("New backup codes downloaded.");
+    } catch (error) {
+        setSecurityMessage(error instanceof Error ? error.message : "Could not generate backup codes.", true);
+    }
+}
+function openMfaResetDialog() {
+    setSecurityMessage("");
+    mfaResetPasswordForm.classList.remove("hidden");
+    mfaResetSetup.classList.add("hidden");
+    mfaResetPassword.value = "";
+    mfaResetCode.value = "";
+    mfaResetSecret.value = "";
+    mfaResetUri.value = "";
+    setMfaResetPasswordMessage("");
+    setMfaResetConfirmMessage("");
+    if (!mfaResetDialog.open) {
+        mfaResetDialog.showModal();
+    }
+    mfaResetPassword.focus();
+}
+function closeMfaResetDialog() {
+    if (mfaResetDialog.open) {
+        mfaResetDialog.close();
+    }
+}
+async function handleMfaResetStart(event) {
+    event.preventDefault();
+    setMfaResetPasswordMessage("");
+    try {
+        const result = await apiSend("/api/security/mfa/start-reset", "POST", {
+            password: mfaResetPassword.value
+        });
+        mfaResetPasswordForm.classList.add("hidden");
+        mfaResetSetup.classList.remove("hidden");
+        mfaResetSecret.value = result.mfaSetup.secret;
+        mfaResetUri.value = result.mfaSetup.setupUri;
+        mfaResetCode.focus();
+    } catch (error) {
+        setMfaResetPasswordMessage(error instanceof Error ? error.message : "Password was not accepted.", true);
+    }
+}
+async function handleMfaResetConfirm(event) {
+    event.preventDefault();
+    setMfaResetConfirmMessage("");
+    try {
+        const result = await apiSend("/api/security/mfa/confirm-reset", "POST", {
+            code: mfaResetCode.value.trim()
+        });
+        state.user = result.user;
+        downloadBackupCodes(result.backupCodes);
+        closeMfaResetDialog();
+        setSecurityMessage("Authenticator updated and new backup codes downloaded.");
+    } catch (error) {
+        setMfaResetConfirmMessage(error instanceof Error ? error.message : "Authenticator code failed.", true);
+    }
+}
 async function handleShareInvite(event) {
     event.preventDefault();
     setShareMessage("");
@@ -885,6 +1165,49 @@ async function handleSharedCalendarCreate(event) {
         setSharedCalendarMessage("Shared calendar created.");
     } catch (error) {
         setSharedCalendarMessage(error instanceof Error ? error.message : "Could not create calendar.", true);
+    }
+}
+async function saveAdminUser(userId, formElement) {
+    const message = formElement.querySelector("[data-admin-user-message]");
+    setInlineMessage(message, "");
+    const formData = new FormData(formElement);
+    try {
+        const summary = await apiSend(`/api/admin/users/${userId}`, "PUT", {
+            firstName: String(formData.get("firstName") ?? ""),
+            lastName: String(formData.get("lastName") ?? ""),
+            displayName: String(formData.get("displayName") ?? ""),
+            email: String(formData.get("email") ?? ""),
+            dateOfBirth: String(formData.get("dateOfBirth") ?? "")
+        });
+        state.adminSummary = summary;
+        renderAdminSummary();
+    } catch (error) {
+        setInlineMessage(message, error instanceof Error ? error.message : "Could not save user.", true);
+    }
+}
+async function resetAdminUserPassword(userId, formElement) {
+    const message = formElement.querySelector("[data-admin-password-message]");
+    const passwordInput = formElement.querySelector("input[name='password']");
+    setInlineMessage(message, "");
+    try {
+        const summary = await apiSend(`/api/admin/users/${userId}/reset-password`, "POST", {
+            password: passwordInput.value
+        });
+        state.adminSummary = summary;
+        passwordInput.value = "";
+        renderAdminSummary();
+    } catch (error) {
+        setInlineMessage(message, error instanceof Error ? error.message : "Could not reset password.", true);
+    }
+}
+async function requireAdminUserMfaReset(userId) {
+    try {
+        const summary = await apiSend(`/api/admin/users/${userId}/require-mfa-reset`, "POST");
+        state.adminSummary = summary;
+        renderAdminSummary();
+    } catch (error) {
+        authMessage.textContent = error instanceof Error ? error.message : "Could not require MFA reset.";
+        authMessage.classList.add("error");
     }
 }
 async function respondToInvitation(shareId, action) {
@@ -1201,6 +1524,22 @@ function setAuthMessage(message, isError = false) {
     authMessage.textContent = message;
     authMessage.classList.toggle("error", isError);
 }
+function setLoginMessage(message, isError = false) {
+    loginMessage.textContent = message;
+    loginMessage.classList.toggle("error", isError);
+}
+function setLoginMfaMessage(message, isError = false) {
+    loginMfaMessage.textContent = message;
+    loginMfaMessage.classList.toggle("error", isError);
+}
+function setSignupMessage(message, isError = false) {
+    signupMessage.textContent = message;
+    signupMessage.classList.toggle("error", isError);
+}
+function setMfaMessage(message, isError = false) {
+    mfaMessage.textContent = message;
+    mfaMessage.classList.toggle("error", isError);
+}
 function setMessage(message, isError = false) {
     formMessage.textContent = message;
     formMessage.classList.toggle("error", isError);
@@ -1216,6 +1555,45 @@ function setShareMessage(message, isError = false) {
 function setSharedCalendarMessage(message, isError = false) {
     sharedCalendarMessage.textContent = message;
     sharedCalendarMessage.classList.toggle("error", isError);
+}
+function setSecurityMessage(message, isError = false) {
+    securityMessage.textContent = message;
+    securityMessage.classList.toggle("error", isError);
+}
+function setMfaResetPasswordMessage(message, isError = false) {
+    mfaResetPasswordMessage.textContent = message;
+    mfaResetPasswordMessage.classList.toggle("error", isError);
+}
+function setMfaResetConfirmMessage(message, isError = false) {
+    mfaResetConfirmMessage.textContent = message;
+    mfaResetConfirmMessage.classList.toggle("error", isError);
+}
+function setInlineMessage(element, message, isError = false) {
+    element.textContent = message;
+    element.classList.toggle("error", isError);
+}
+function downloadBackupCodes(codes) {
+    if (!codes.length) {
+        return;
+    }
+    const body = [
+        "Countdown Calendar backup codes",
+        "Each code can be used once in place of an authenticator code.",
+        "",
+        ...codes
+    ].join("\n");
+    const blob = new Blob([
+        `${body}\n`
+    ], {
+        type: "text/plain;charset=utf-8"
+    });
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = "countdown-calendar-backup-codes.txt";
+    document.body.append(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(link.href);
 }
 function escapeHtml(value) {
     return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#039;");
