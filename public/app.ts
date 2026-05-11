@@ -3,6 +3,12 @@ type Category = {
   name: string;
   color: string;
   builtin: boolean;
+  ownerUserId: number | null;
+  ownerDisplayName: string | null;
+  calendarType: "builtin" | "personal" | "birthday" | "anniversary" | "custom" | "shared";
+  canAddEvents: boolean;
+  canShare: boolean;
+  sharedWithMe: boolean;
 };
 
 type Recurrence = "none" | "daily" | "weekly" | "monthly" | "annual";
@@ -19,6 +25,10 @@ type CalendarEvent = {
   categoryName: string;
   categoryColor: string;
   categoryBuiltin: boolean;
+  categoryOwnerUserId: number | null;
+  categoryCalendarType: Category["calendarType"];
+  categoryOwnerDisplayName: string | null;
+  canEdit: boolean;
   recurrence: Recurrence;
   recurrenceInterval: number;
   recurrenceLabel: string;
@@ -52,6 +62,47 @@ type ViewName = "home" | "settings";
 
 const CATEGORY_FILTER_STORAGE_KEY = "countdown-calendar-hidden-categories";
 
+type CurrentUser = {
+  id: number;
+  firstName: string;
+  lastName: string;
+  displayName: string;
+  email: string;
+  dateOfBirth: string;
+};
+
+type AuthSessionResponse = {
+  authenticated: boolean;
+  user?: CurrentUser;
+  mfaRequired?: boolean;
+  mfaSetup?: {
+    secret: string;
+    setupUri: string;
+  };
+};
+
+type ShareItem = {
+  id: number;
+  categoryId: number;
+  categoryName: string;
+  categoryColor: string;
+  ownerUserId: number;
+  ownerDisplayName: string;
+  inviteeUserId: number | null;
+  inviteeEmail: string;
+  inviteeDisplayName: string | null;
+  status: "pending" | "accepted" | "declined" | "revoked";
+  createdAt: string;
+  updatedAt: string;
+};
+
+type ShareState = {
+  ownedCalendars: Category[];
+  incoming: ShareItem[];
+  outgoing: ShareItem[];
+  sharedWithMe: ShareItem[];
+};
+
 type AppSettings = {
   eventDetailsEnabled: boolean;
   darkModeEnabled: boolean;
@@ -66,6 +117,9 @@ const state: {
   settings: AppSettings;
   displayMode: DisplayMode;
   calendarCursor: Date;
+  user: CurrentUser | null;
+  mfaMode: "setup" | "verify";
+  shares: ShareState | null;
 } = {
   categories: [],
   events: [],
@@ -74,13 +128,38 @@ const state: {
   hiddenCategoryIds: loadHiddenCategoryIds(),
   settings: { eventDetailsEnabled: true, darkModeEnabled: false },
   displayMode: "list",
-  calendarCursor: startOfToday()
+  calendarCursor: startOfToday(),
+  user: null,
+  mfaMode: "setup",
+  shares: null
 };
 
 const navButtons = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-view-target]"));
 const openEventButtons = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-open-event-modal]"));
 const views = Array.from(document.querySelectorAll<HTMLElement>(".view"));
+const authShell = document.querySelector("#auth-shell") as HTMLElement;
+const appShell = document.querySelector("#app-shell") as HTMLElement;
+const authForms = document.querySelector("#auth-forms") as HTMLElement;
+const loginForm = document.querySelector("#login-form") as HTMLFormElement;
+const signupForm = document.querySelector("#signup-form") as HTMLFormElement;
+const loginEmail = document.querySelector("#login-email") as HTMLInputElement;
+const loginPassword = document.querySelector("#login-password") as HTMLInputElement;
+const signupFirstName = document.querySelector("#signup-first-name") as HTMLInputElement;
+const signupLastName = document.querySelector("#signup-last-name") as HTMLInputElement;
+const signupDisplayName = document.querySelector("#signup-display-name") as HTMLInputElement;
+const signupEmail = document.querySelector("#signup-email") as HTMLInputElement;
+const signupDateOfBirth = document.querySelector("#signup-date-of-birth") as HTMLInputElement;
+const signupPassword = document.querySelector("#signup-password") as HTMLInputElement;
+const signupConfirmPassword = document.querySelector("#signup-confirm-password") as HTMLInputElement;
+const mfaPanel = document.querySelector("#mfa-panel") as HTMLElement;
+const mfaForm = document.querySelector("#mfa-form") as HTMLFormElement;
+const mfaSecret = document.querySelector("#mfa-secret") as HTMLInputElement;
+const mfaUri = document.querySelector("#mfa-uri") as HTMLInputElement;
+const mfaCode = document.querySelector("#mfa-code") as HTMLInputElement;
+const authMessage = document.querySelector("#auth-message") as HTMLParagraphElement;
 const navMenu = document.querySelector("#nav-menu") as HTMLDetailsElement;
+const userBadge = document.querySelector("#user-badge") as HTMLParagraphElement;
+const logoutButton = document.querySelector("#logout-button") as HTMLButtonElement;
 const eventDialog = document.querySelector("#event-dialog") as HTMLDialogElement;
 const closeEventModalButton = document.querySelector("#close-event-modal") as HTMLButtonElement;
 
@@ -127,6 +206,18 @@ const importMessage = document.querySelector("#import-message") as HTMLParagraph
 const eventDetailsSetting = document.querySelector("#event-details-setting") as HTMLInputElement;
 const darkModeSetting = document.querySelector("#dark-mode-setting") as HTMLInputElement;
 const settingsMessage = document.querySelector("#settings-message") as HTMLParagraphElement;
+const shareForm = document.querySelector("#share-form") as HTMLFormElement;
+const shareCalendar = document.querySelector("#share-calendar") as HTMLSelectElement;
+const shareEmail = document.querySelector("#share-email") as HTMLInputElement;
+const shareMessage = document.querySelector("#share-message") as HTMLParagraphElement;
+const incomingShares = document.querySelector("#incoming-shares") as HTMLDivElement;
+const outgoingShares = document.querySelector("#outgoing-shares") as HTMLDivElement;
+const acceptedShares = document.querySelector("#accepted-shares") as HTMLDivElement;
+const sharedCalendarForm = document.querySelector("#shared-calendar-form") as HTMLFormElement;
+const sharedCalendarName = document.querySelector("#shared-calendar-name") as HTMLInputElement;
+const sharedCalendarColor = document.querySelector("#shared-calendar-color") as HTMLInputElement;
+const sharedCalendarEmail = document.querySelector("#shared-calendar-email") as HTMLInputElement;
+const sharedCalendarMessage = document.querySelector("#shared-calendar-message") as HTMLParagraphElement;
 
 const dateFormatter = new Intl.DateTimeFormat(undefined, {
   weekday: "short",
@@ -157,6 +248,11 @@ navButtons.forEach((button) => {
     closeMenu();
   });
 });
+
+loginForm.addEventListener("submit", handleLogin);
+signupForm.addEventListener("submit", handleSignup);
+mfaForm.addEventListener("submit", handleMfa);
+logoutButton.addEventListener("click", handleLogout);
 
 openEventButtons.forEach((button) => {
   button.addEventListener("click", () => {
@@ -200,14 +296,31 @@ importForm.addEventListener("submit", handleImport);
 importCategoryInput.addEventListener("input", syncImportCategoryColor);
 eventDetailsSetting.addEventListener("change", updateEventDetailsSetting);
 darkModeSetting.addEventListener("change", updateEventDetailsSetting);
+shareForm.addEventListener("submit", handleShareInvite);
+sharedCalendarForm.addEventListener("submit", handleSharedCalendarCreate);
 
 void initialize();
 
 async function initialize(): Promise<void> {
   setTodayAsDefault();
   syncRecurrenceFields();
+  const session = await apiGet<AuthSessionResponse>("/api/auth/session");
+  if (!session.authenticated || !session.user) {
+    showAuth(session);
+    return;
+  }
+
+  await loadApp(session.user);
+}
+
+async function loadApp(user: CurrentUser): Promise<void> {
+  state.user = user;
+  userBadge.textContent = `${user.displayName} (${user.email})`;
+  authShell.classList.add("hidden");
+  appShell.classList.remove("hidden");
   await refreshSettings();
   await refreshCategories();
+  await refreshShares();
   await refreshEvents();
   const initialHash = window.location.hash.replace("#", "");
   const initialView = viewFromHash();
@@ -216,6 +329,102 @@ async function initialize(): Promise<void> {
   if (initialHash === "add") {
     openEventModal();
   }
+}
+
+function showAuth(session: AuthSessionResponse = { authenticated: false }): void {
+  state.user = session.user ?? null;
+  appShell.classList.add("hidden");
+  authShell.classList.remove("hidden");
+
+  if (session.mfaSetup) {
+    state.mfaMode = "setup";
+    authForms.classList.add("hidden");
+    mfaPanel.classList.remove("hidden");
+    mfaSecret.value = session.mfaSetup.secret;
+    mfaUri.value = session.mfaSetup.setupUri;
+    authMessage.textContent = "Add this key to an authenticator app, then enter the current code.";
+    authMessage.classList.remove("error");
+    mfaCode.focus();
+    return;
+  }
+
+  if (session.mfaRequired) {
+    state.mfaMode = "verify";
+    authForms.classList.add("hidden");
+    mfaPanel.classList.remove("hidden");
+    mfaSecret.value = "";
+    mfaUri.value = "";
+    authMessage.textContent = "Enter your authenticator code.";
+    authMessage.classList.remove("error");
+    mfaCode.focus();
+    return;
+  }
+
+  authForms.classList.remove("hidden");
+  mfaPanel.classList.add("hidden");
+}
+
+async function handleLogin(event: SubmitEvent): Promise<void> {
+  event.preventDefault();
+  setAuthMessage("");
+  try {
+    const session = await apiSend<AuthSessionResponse>("/api/auth/login", "POST", {
+      email: loginEmail.value.trim(),
+      password: loginPassword.value
+    });
+    if (session.authenticated && session.user) {
+      await loadApp(session.user);
+    } else {
+      showAuth(session);
+    }
+  } catch (error) {
+    setAuthMessage(error instanceof Error ? error.message : "Login failed.", true);
+  }
+}
+
+async function handleSignup(event: SubmitEvent): Promise<void> {
+  event.preventDefault();
+  setAuthMessage("");
+  try {
+    const session = await apiSend<AuthSessionResponse>("/api/auth/signup", "POST", {
+      firstName: signupFirstName.value.trim(),
+      lastName: signupLastName.value.trim(),
+      displayName: signupDisplayName.value.trim(),
+      email: signupEmail.value.trim(),
+      dateOfBirth: signupDateOfBirth.value,
+      password: signupPassword.value,
+      confirmPassword: signupConfirmPassword.value
+    });
+    showAuth(session);
+  } catch (error) {
+    setAuthMessage(error instanceof Error ? error.message : "Signup failed.", true);
+  }
+}
+
+async function handleMfa(event: SubmitEvent): Promise<void> {
+  event.preventDefault();
+  setAuthMessage("");
+  try {
+    const endpoint = state.mfaMode === "setup" ? "/api/auth/mfa/enable" : "/api/auth/mfa/verify";
+    const session = await apiSend<AuthSessionResponse>(endpoint, "POST", {
+      code: mfaCode.value.trim()
+    });
+    mfaCode.value = "";
+    if (session.authenticated && session.user) {
+      await loadApp(session.user);
+    }
+  } catch (error) {
+    setAuthMessage(error instanceof Error ? error.message : "Authenticator code failed.", true);
+  }
+}
+
+async function handleLogout(): Promise<void> {
+  await apiSend("/api/auth/logout", "POST");
+  state.events = [];
+  state.categories = [];
+  state.shares = null;
+  showAuth();
+  closeMenu();
 }
 
 async function refreshSettings(): Promise<void> {
@@ -231,6 +440,7 @@ async function refreshCategories(): Promise<void> {
   state.categories = data.categories;
   pruneHiddenCategoryIds();
   renderCategories();
+  renderShareCalendarOptions();
   syncCategoryColor();
   syncImportCategoryColor();
 }
@@ -239,6 +449,13 @@ async function refreshEvents(): Promise<void> {
   const data = await apiGet<{ events: CalendarEvent[] }>(`/api/events?days=${rangeDays.value}`);
   state.events = data.events;
   renderCurrentView();
+}
+
+async function refreshShares(): Promise<void> {
+  const data = await apiGet<ShareState>("/api/shares");
+  state.shares = data;
+  renderShareCalendarOptions();
+  renderShares();
 }
 
 async function updateEventDetailsSetting(): Promise<void> {
@@ -312,6 +529,7 @@ function closeMenu(): void {
 
 function renderCategories(): void {
   categoryOptions.innerHTML = state.categories
+    .filter((category) => category.canAddEvents)
     .map((category) => `<option value="${escapeHtml(category.name)}"></option>`)
     .join("");
 
@@ -329,7 +547,7 @@ function renderCategories(): void {
           aria-pressed="${isVisible}"
         >
           <span class="swatch" style="background:${category.color}"></span>
-          ${escapeHtml(category.name)}
+          ${escapeHtml(categoryLabel(category))}
           <span class="filter-state">${isVisible ? "On" : "Off"}</span>
         </button>
       `;
@@ -341,6 +559,87 @@ function renderCategories(): void {
       toggleCategory(Number((button as HTMLButtonElement).dataset.categoryId));
     });
   });
+}
+
+function renderShareCalendarOptions(): void {
+  const ownedCalendars = state.shares?.ownedCalendars ?? state.categories.filter((category) => category.canShare);
+  shareCalendar.innerHTML = ownedCalendars.length
+    ? ownedCalendars
+      .map((category) => `<option value="${category.id}">${escapeHtml(categoryLabel(category))}</option>`)
+      .join("")
+    : `<option value="">No owned calendars</option>`;
+  shareCalendar.disabled = ownedCalendars.length === 0;
+}
+
+function renderShares(): void {
+  const shares = state.shares;
+  if (!shares) {
+    incomingShares.innerHTML = "";
+    outgoingShares.innerHTML = "";
+    acceptedShares.innerHTML = "";
+    return;
+  }
+
+  incomingShares.innerHTML = shares.incoming.length
+    ? shares.incoming.map(renderIncomingShare).join("")
+    : `<div class="empty-inline">No pending invitations.</div>`;
+  outgoingShares.innerHTML = shares.outgoing.length
+    ? shares.outgoing.map(renderOutgoingShare).join("")
+    : `<div class="empty-inline">Nothing shared yet.</div>`;
+  acceptedShares.innerHTML = shares.sharedWithMe.length
+    ? shares.sharedWithMe.map(renderAcceptedShare).join("")
+    : `<div class="empty-inline">No shared calendars accepted.</div>`;
+
+  incomingShares.querySelectorAll("[data-share-action]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const target = button as HTMLButtonElement;
+      await respondToInvitation(Number(target.dataset.shareId), target.dataset.shareAction ?? "");
+    });
+  });
+
+  outgoingShares.querySelectorAll("[data-revoke-share]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      await revokeShare(Number((button as HTMLButtonElement).dataset.revokeShare));
+    });
+  });
+}
+
+function renderIncomingShare(share: ShareItem): string {
+  return `
+    <article class="share-item">
+      <div>
+        <strong>${escapeHtml(share.categoryName)}</strong>
+        <span>from ${escapeHtml(share.ownerDisplayName)}</span>
+      </div>
+      <div class="share-actions">
+        <button class="button button-ghost" type="button" data-share-id="${share.id}" data-share-action="decline">Decline</button>
+        <button class="button button-primary" type="button" data-share-id="${share.id}" data-share-action="accept">Accept</button>
+      </div>
+    </article>
+  `;
+}
+
+function renderOutgoingShare(share: ShareItem): string {
+  return `
+    <article class="share-item">
+      <div>
+        <strong>${escapeHtml(share.categoryName)}</strong>
+        <span>${escapeHtml(share.inviteeDisplayName ?? share.inviteeEmail)} - ${escapeHtml(share.status)}</span>
+      </div>
+      <button class="button button-ghost" type="button" data-revoke-share="${share.id}">Revoke</button>
+    </article>
+  `;
+}
+
+function renderAcceptedShare(share: ShareItem): string {
+  return `
+    <article class="share-item">
+      <div>
+        <strong>${escapeHtml(share.categoryName)}</strong>
+        <span>from ${escapeHtml(share.ownerDisplayName)}</span>
+      </div>
+    </article>
+  `;
 }
 
 function renderEvents(): void {
@@ -652,7 +951,7 @@ function saveHiddenCategoryIds(): void {
 }
 
 function renderEventCard(event: CalendarEvent): string {
-  const canManage = event.source === "manual";
+  const canManage = event.canEdit;
   const sourceLabel = labelForSource(event.source);
   const details = renderEventDetails(event);
   const menu = canManage
@@ -679,7 +978,7 @@ function renderEventCard(event: CalendarEvent): string {
         <div class="event-meta">
           <span class="category-pill">
             <span class="swatch" style="background:${event.categoryColor}"></span>
-            ${escapeHtml(event.categoryName)}
+            ${escapeHtml(eventCategoryLabel(event))}
           </span>
           <span>${formatDateForDisplay(event.occurrenceDate)}</span>
           <span>${sourceLabel}</span>
@@ -825,6 +1124,69 @@ async function handleImport(event: SubmitEvent): Promise<void> {
   }
 }
 
+async function handleShareInvite(event: SubmitEvent): Promise<void> {
+  event.preventDefault();
+  setShareMessage("");
+
+  try {
+    const shares = await apiSend<ShareState>("/api/shares/invite", "POST", {
+      categoryId: Number(shareCalendar.value),
+      email: shareEmail.value.trim()
+    });
+    state.shares = shares;
+    shareEmail.value = "";
+    renderShares();
+    setShareMessage("Invitation added.");
+  } catch (error) {
+    setShareMessage(error instanceof Error ? error.message : "Could not send invitation.", true);
+  }
+}
+
+async function handleSharedCalendarCreate(event: SubmitEvent): Promise<void> {
+  event.preventDefault();
+  setSharedCalendarMessage("");
+
+  try {
+    const result = await apiSend<{ category: Category; shares: ShareState }>("/api/calendars/shared", "POST", {
+      name: sharedCalendarName.value.trim(),
+      color: sharedCalendarColor.value,
+      email: sharedCalendarEmail.value.trim()
+    });
+    state.shares = result.shares;
+    await refreshCategories();
+    renderShares();
+    sharedCalendarForm.reset();
+    sharedCalendarColor.value = "#2563eb";
+    setSharedCalendarMessage("Shared calendar created.");
+  } catch (error) {
+    setSharedCalendarMessage(error instanceof Error ? error.message : "Could not create calendar.", true);
+  }
+}
+
+async function respondToInvitation(shareId: number, action: string): Promise<void> {
+  try {
+    const shares = await apiSend<ShareState>("/api/shares/respond", "POST", { shareId, action });
+    state.shares = shares;
+    await refreshCategories();
+    await refreshEvents();
+    renderShares();
+  } catch (error) {
+    setShareMessage(error instanceof Error ? error.message : "Could not update invitation.", true);
+  }
+}
+
+async function revokeShare(shareId: number): Promise<void> {
+  try {
+    const shares = await apiSend<ShareState>("/api/shares/revoke", "POST", { shareId });
+    state.shares = shares;
+    await refreshCategories();
+    await refreshEvents();
+    renderShares();
+  } catch (error) {
+    setShareMessage(error instanceof Error ? error.message : "Could not revoke share.", true);
+  }
+}
+
 function getPayload(): EventPayload {
   return {
     title: titleInput.value.trim(),
@@ -938,7 +1300,7 @@ function syncImportCategoryColor(): void {
 }
 
 function findCategory(name: string): Category | undefined {
-  return state.categories.find((category) => category.name.toLowerCase() === name.toLowerCase());
+  return state.categories.find((category) => category.canAddEvents && category.name.toLowerCase() === name.toLowerCase());
 }
 
 function setTodayAsDefault(): void {
@@ -1119,6 +1481,25 @@ function labelForSource(source: CalendarEvent["source"]): string {
   return "Manual";
 }
 
+function categoryLabel(category: Category): string {
+  if (category.sharedWithMe && category.ownerDisplayName) {
+    return `${category.name} (${category.ownerDisplayName})`;
+  }
+  return category.name;
+}
+
+function eventCategoryLabel(event: CalendarEvent): string {
+  if (
+    event.categoryOwnerUserId
+    && state.user
+    && event.categoryOwnerUserId !== state.user.id
+    && event.categoryOwnerDisplayName
+  ) {
+    return `${event.categoryName} (${event.categoryOwnerDisplayName})`;
+  }
+  return event.categoryName;
+}
+
 async function apiGet<T>(url: string): Promise<T> {
   const response = await fetch(url);
   return handleResponse<T>(response);
@@ -1138,10 +1519,18 @@ async function handleResponse<T>(response: Response): Promise<T> {
   const data = contentType.includes("application/json") ? await response.json() : undefined;
 
   if (!response.ok) {
+    if (response.status === 401) {
+      showAuth();
+    }
     throw new Error(data?.error ?? `Request failed with ${response.status}`);
   }
 
   return data as T;
+}
+
+function setAuthMessage(message: string, isError = false): void {
+  authMessage.textContent = message;
+  authMessage.classList.toggle("error", isError);
 }
 
 function setMessage(message: string, isError = false): void {
@@ -1152,6 +1541,16 @@ function setMessage(message: string, isError = false): void {
 function setImportMessage(message: string, isError = false): void {
   importMessage.textContent = message;
   importMessage.classList.toggle("error", isError);
+}
+
+function setShareMessage(message: string, isError = false): void {
+  shareMessage.textContent = message;
+  shareMessage.classList.toggle("error", isError);
+}
+
+function setSharedCalendarMessage(message: string, isError = false): void {
+  sharedCalendarMessage.textContent = message;
+  sharedCalendarMessage.classList.toggle("error", isError);
 }
 
 function escapeHtml(value: string): string {

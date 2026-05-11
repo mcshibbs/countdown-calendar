@@ -2,7 +2,7 @@
 
 A dependency-free HTML/CSS/TypeScript countdown calendar with a SQLite database. It seeds U.S. federal holidays in orange, Christian holidays in yellow, and lets you add birthdays, anniversaries, and any other event with custom category colors.
 
-Version 1.1 adds Home/Add Event/Settings navigation, moves exports into Settings, and includes bulk import for `.ics`, JSON, and CSV files. Version 1.1.1 folds navigation into a collapsible menu and opens Add Event as a modal over the Home screen. Version 1.1.2 improves iOS/mobile spacing and stacks category labels vertically on narrow screens. Version 1.1.3 adds a collapsible calendar filter with per-category on/off toggles. Version 1.1.4 adds manual-entry action menus and a downloadable CSV import template. Version 1.1.5 adds expandable holiday and custom event details with a Settings toggle. Version 1.2 adds dark mode, compact view options, calendar views, built-in Birthday and Anniversaries calendars, and richer recurrence rules. Version 1.2.1 adds a separate American Holidays calendar for common U.S. cultural observances.
+Version 1.1 adds Home/Add Event/Settings navigation, moves exports into Settings, and includes bulk import for `.ics`, JSON, and CSV files. Version 1.1.1 folds navigation into a collapsible menu and opens Add Event as a modal over the Home screen. Version 1.1.2 improves iOS/mobile spacing and stacks category labels vertically on narrow screens. Version 1.1.3 adds a collapsible calendar filter with per-category on/off toggles. Version 1.1.4 adds manual-entry action menus and a downloadable CSV import template. Version 1.1.5 adds expandable holiday and custom event details with a Settings toggle. Version 1.2 adds dark mode, compact view options, calendar views, built-in Birthday and Anniversaries calendars, and richer recurrence rules. Version 1.2.1 adds a separate American Holidays calendar for common U.S. cultural observances. Version 1.3 adds multi-user accounts, login sessions, authenticator-app MFA, personal calendars, shared calendars, and in-app calendar invitations.
 
 ## Local Run
 
@@ -42,13 +42,17 @@ DB_PATH=/var/lib/countdown-calendar/calendar.db HTTP_PORT=80 node --experimental
 
 The app also exposes:
 
+- `POST /api/auth/signup`, `POST /api/auth/login`, `POST /api/auth/mfa/enable`, `POST /api/auth/mfa/verify`, and `POST /api/auth/logout` for account access.
 - `GET /api/export` for a JSON export of categories and events.
 - `GET /api/export.db` for a consistent SQLite backup made with `VACUUM INTO`.
 - `GET /api/import-template.csv` for a CSV file with the supported import columns.
 - `POST /api/import` for bulk event import from `.ics`, JSON, or CSV content.
 - `GET /api/settings` and `PUT /api/settings` for persisted display settings.
+- `GET /api/shares`, `POST /api/shares/invite`, `POST /api/shares/respond`, `POST /api/shares/revoke`, and `POST /api/calendars/shared` for calendar sharing.
 
-Custom events can include optional expandable details. Use the Add Event checkbox or the CSV/JSON import fields `details_enabled` and `detail_start_date`; the existing `notes`/`description` value becomes the summary. Manual recurrence supports `none`, `daily`, `weekly`, `monthly`, and `annual`; use `recurrence_interval` for every-N-day/week/month/year schedules. Built-in holiday calendars include Federal Holidays, Christian Holidays, and American Holidays.
+Custom events can include optional expandable details. Use the Add Event checkbox or the CSV/JSON import fields `details_enabled` and `detail_start_date`; the existing `notes`/`description` value becomes the summary. Manual recurrence supports `none`, `daily`, `weekly`, `monthly`, and `annual`; use `recurrence_interval` for every-N-day/week/month/year schedules. Built-in holiday calendars include Federal Holidays, Christian Holidays, and American Holidays. Every user also gets their own Personal Calendar, Birthday, and Anniversaries calendars.
+
+Calendar invitations are stored in the app and appear under Settings for users with matching email addresses. Outbound email invitations are not enabled yet because that needs SMTP or a transactional email provider configuration.
 
 To move instances, either use the `Download DB` button or stop the service and copy `calendar.db*` to the new VM or LXC container.
 

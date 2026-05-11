@@ -7,15 +7,105 @@
     <link rel="stylesheet" href="/styles.css">
   </head>
   <body>
-    <main class="app-shell">
+    <section id="auth-shell" class="auth-shell">
+      <div class="auth-card">
+        <div class="auth-heading">
+          <p class="eyebrow">Private calendar</p>
+          <h1>Countdown Calendar</h1>
+        </div>
+
+        <div id="auth-forms" class="auth-forms">
+          <section class="auth-panel">
+            <h2>Log in</h2>
+            <form id="login-form" class="auth-form">
+              <label>
+                <span>Email address</span>
+                <input id="login-email" name="email" type="email" autocomplete="email" required>
+              </label>
+              <label>
+                <span>Password</span>
+                <input id="login-password" name="password" type="password" autocomplete="current-password" required>
+              </label>
+              <button class="button button-primary full-width" type="submit">Log in</button>
+            </form>
+          </section>
+
+          <section class="auth-panel">
+            <h2>Sign up</h2>
+            <form id="signup-form" class="auth-form">
+              <div class="form-row">
+                <label>
+                  <span>First name</span>
+                  <input id="signup-first-name" name="firstName" autocomplete="given-name" required>
+                </label>
+                <label>
+                  <span>Last name</span>
+                  <input id="signup-last-name" name="lastName" autocomplete="family-name" required>
+                </label>
+              </div>
+              <label>
+                <span>Display name</span>
+                <input id="signup-display-name" name="displayName" autocomplete="nickname" required>
+              </label>
+              <label>
+                <span>Email address</span>
+                <input id="signup-email" name="email" type="email" autocomplete="email" required>
+              </label>
+              <label>
+                <span>Date of birth</span>
+                <input id="signup-date-of-birth" name="dateOfBirth" type="date" required>
+              </label>
+              <div class="form-row">
+                <label>
+                  <span>Password</span>
+                  <input id="signup-password" name="password" type="password" autocomplete="new-password" minlength="10" required>
+                </label>
+                <label>
+                  <span>Confirm password</span>
+                  <input id="signup-confirm-password" name="confirmPassword" type="password" autocomplete="new-password" minlength="10" required>
+                </label>
+              </div>
+              <button class="button button-primary full-width" type="submit">Create account</button>
+            </form>
+          </section>
+        </div>
+
+        <section id="mfa-panel" class="auth-panel mfa-panel hidden">
+          <h2>Authenticator setup</h2>
+          <label>
+            <span>Setup key</span>
+            <input id="mfa-secret" readonly>
+          </label>
+          <label>
+            <span>Setup URI</span>
+            <input id="mfa-uri" readonly>
+          </label>
+          <form id="mfa-form" class="auth-form">
+            <label>
+              <span>6-digit code</span>
+              <input id="mfa-code" name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" required>
+            </label>
+            <button class="button button-primary full-width" type="submit">Verify code</button>
+          </form>
+        </section>
+
+        <p id="auth-message" class="form-message" role="status"></p>
+      </div>
+    </section>
+
+    <main id="app-shell" class="app-shell hidden">
       <header class="app-header">
-        <h1>Countdown Calendar</h1>
+        <div>
+          <h1>Countdown Calendar</h1>
+          <p id="user-badge" class="user-badge"></p>
+        </div>
         <details id="nav-menu" class="nav-menu">
           <summary class="menu-button">Menu</summary>
           <nav class="app-nav" aria-label="Primary navigation">
             <button class="nav-button is-active" type="button" data-view-target="home">Home</button>
             <button class="nav-button" type="button" data-open-event-modal>Add Event</button>
             <button class="nav-button" type="button" data-view-target="settings">Settings</button>
+            <button class="nav-button" id="logout-button" type="button">Log out</button>
           </nav>
         </details>
       </header>
@@ -112,6 +202,64 @@
               <a class="button button-ghost" href="/api/export">Export JSON</a>
               <a class="button button-primary" href="/api/export.db">Download DB</a>
             </div>
+          </section>
+
+          <section class="settings-panel">
+            <div class="panel-heading">
+              <p class="eyebrow">Sharing</p>
+              <h2>Calendar invitations</h2>
+            </div>
+            <form id="share-form" class="import-form">
+              <label>
+                <span>Calendar</span>
+                <select id="share-calendar" required></select>
+              </label>
+              <label>
+                <span>Email address</span>
+                <input id="share-email" type="email" autocomplete="email" required>
+              </label>
+              <button class="button button-primary full-width" type="submit">Send invitation</button>
+              <p id="share-message" class="form-message" role="status"></p>
+            </form>
+
+            <div class="share-section">
+              <h3>Incoming</h3>
+              <div id="incoming-shares" class="share-list"></div>
+            </div>
+            <div class="share-section">
+              <h3>Shared by me</h3>
+              <div id="outgoing-shares" class="share-list"></div>
+            </div>
+            <div class="share-section">
+              <h3>Shared with me</h3>
+              <div id="accepted-shares" class="share-list"></div>
+            </div>
+          </section>
+
+          <section class="settings-panel">
+            <div class="panel-heading">
+              <p class="eyebrow">Shared</p>
+              <h2>New shared calendar</h2>
+            </div>
+            <form id="shared-calendar-form" class="import-form">
+              <label>
+                <span>Name</span>
+                <input id="shared-calendar-name" maxlength="80" required>
+              </label>
+              <div class="form-row color-row">
+                <label>
+                  <span>Color</span>
+                  <input id="shared-calendar-color" type="color" value="#2563eb">
+                </label>
+                <div class="color-state">Shared calendar</div>
+              </div>
+              <label>
+                <span>Invite email</span>
+                <input id="shared-calendar-email" type="email" autocomplete="email">
+              </label>
+              <button class="button button-primary full-width" type="submit">Create calendar</button>
+              <p id="shared-calendar-message" class="form-message" role="status"></p>
+            </form>
           </section>
 
           <section class="settings-panel">

@@ -1,5 +1,12 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { createServer as createHttpsServer } from "node:https";
+import {
+  createHash,
+  createHmac,
+  pbkdf2Sync,
+  randomBytes,
+  timingSafeEqual
+} from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import {
   createReadStream,
@@ -16,12 +23,65 @@ type CategoryRow = {
   name: string;
   color: string;
   builtin: number;
+  owner_user_id: number | null;
+  calendar_type: CalendarType;
+  owner_display_name: string | null;
   created_at: string;
   updated_at: string;
 };
 
 type Recurrence = "none" | "daily" | "weekly" | "monthly" | "annual";
 type EventSource = "manual" | "federal" | "christian" | "american";
+type CalendarType = "builtin" | "personal" | "birthday" | "anniversary" | "custom" | "shared";
+type InvitationStatus = "pending" | "accepted" | "declined" | "revoked";
+
+type UserRow = {
+  id: number;
+  first_name: string;
+  last_name: string;
+  display_name: string;
+  email: string;
+  date_of_birth: string;
+  password_hash: string;
+  password_salt: string;
+  mfa_secret: string;
+  mfa_enabled: number;
+  created_at: string;
+  updated_at: string;
+};
+
+type SessionRow = {
+  id: number;
+  user_id: number;
+  token_hash: string;
+  mfa_verified: number;
+  expires_at: string;
+  created_at: string;
+};
+
+type CalendarShareRow = {
+  id: number;
+  category_id: number;
+  owner_user_id: number;
+  invitee_user_id: number | null;
+  invitee_email: string;
+  status: InvitationStatus;
+  created_at: string;
+  updated_at: string;
+  category_name: string;
+  category_color: string;
+  owner_display_name: string;
+  invitee_display_name: string | null;
+};
+
+type CurrentUser = {
+  id: number;
+  firstName: string;
+  lastName: string;
+  displayName: string;
+  email: string;
+  dateOfBirth: string;
+};
 
 type EventRow = {
   id: number;
@@ -39,6 +99,9 @@ type EventRow = {
   category_name: string;
   category_color: string;
   category_builtin: number;
+  category_owner_user_id: number | null;
+  category_calendar_type: CalendarType;
+  category_owner_display_name: string | null;
 };
 
 type UpcomingEvent = {
@@ -51,6 +114,10 @@ type UpcomingEvent = {
   categoryName: string;
   categoryColor: string;
   categoryBuiltin: boolean;
+  categoryOwnerUserId: number | null;
+  categoryCalendarType: CalendarType;
+  categoryOwnerDisplayName: string | null;
+  canEdit: boolean;
   recurrence: Recurrence;
   recurrenceInterval: number;
   recurrenceLabel: string;
@@ -93,6 +160,10 @@ const publicDir = resolve(rootDir, "public");
 const defaultDataDir = resolve(rootDir, "data");
 const configuredDbPath = process.env.DB_PATH ?? join(defaultDataDir, "calendar.db");
 const dbPath = configuredDbPath === ":memory:" ? ":memory:" : resolve(configuredDbPath);
+const sessionCookieName = "cc_session";
+const sessionTtlDays = 30;
+const passwordIterations = 310_000;
+const appIssuer = "Countdown Calendar";
 
 if (dbPath !== ":memory:") {
   mkdirSync(dirname(dbPath), { recursive: true });
@@ -106,11 +177,52 @@ db.exec(`
 
   CREATE TABLE IF NOT EXISTS categories (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+    name TEXT NOT NULL COLLATE NOCASE,
     color TEXT NOT NULL,
     builtin INTEGER NOT NULL DEFAULT 0,
+    owner_user_id INTEGER,
+    calendar_type TEXT NOT NULL DEFAULT 'custom' CHECK (calendar_type IN ('builtin', 'personal', 'birthday', 'anniversary', 'custom', 'shared')),
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    first_name TEXT NOT NULL,
+    last_name TEXT NOT NULL,
+    display_name TEXT NOT NULL,
+    email TEXT NOT NULL COLLATE NOCASE UNIQUE,
+    date_of_birth TEXT NOT NULL,
+    password_hash TEXT NOT NULL,
+    password_salt TEXT NOT NULL,
+    mfa_secret TEXT NOT NULL,
+    mfa_enabled INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    mfa_verified INTEGER NOT NULL DEFAULT 0,
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS calendar_shares (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    category_id INTEGER NOT NULL,
+    owner_user_id INTEGER NOT NULL,
+    invitee_user_id INTEGER,
+    invitee_email TEXT NOT NULL COLLATE NOCASE,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'accepted', 'declined', 'revoked')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE CASCADE,
+    FOREIGN KEY (owner_user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (invitee_user_id) REFERENCES users(id) ON DELETE CASCADE
   );
 
   CREATE TABLE IF NOT EXISTS events (
@@ -148,10 +260,12 @@ function nowIso(): string {
 }
 
 function migrateSchema(): void {
+  migrateCategoriesTable();
   ensureColumn("events", "details_enabled", "INTEGER NOT NULL DEFAULT 0");
   ensureColumn("events", "detail_start_date", "TEXT NOT NULL DEFAULT ''");
   ensureColumn("events", "recurrence_interval", "INTEGER NOT NULL DEFAULT 1");
   migrateEventsTableConstraints();
+  ensureAuthIndexes();
 }
 
 function ensureColumn(tableName: string, columnName: string, definition: string): void {
@@ -159,6 +273,110 @@ function ensureColumn(tableName: string, columnName: string, definition: string)
   if (!columns.some((column) => column.name === columnName)) {
     db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definition}`);
   }
+}
+
+function migrateCategoriesTable(): void {
+  const row = db
+    .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'categories'")
+    .get() as { sql: string } | undefined;
+  const columns = db.prepare("PRAGMA table_info(categories)").all() as Array<{ name: string }>;
+  const hasOwner = columns.some((column) => column.name === "owner_user_id");
+  const hasType = columns.some((column) => column.name === "calendar_type");
+  const hasLegacyUniqueName = Boolean(row?.sql.includes("name TEXT NOT NULL COLLATE NOCASE UNIQUE"));
+
+  if (hasOwner && hasType && !hasLegacyUniqueName) {
+    return;
+  }
+
+  const categories = db.prepare("SELECT * FROM categories ORDER BY id ASC").all() as Array<{
+    id: number;
+    name: string;
+    color: string;
+    builtin: number;
+    owner_user_id?: number | null;
+    calendar_type?: CalendarType;
+    created_at: string;
+    updated_at: string;
+  }>;
+
+  db.exec(`
+    PRAGMA foreign_keys = OFF;
+    BEGIN;
+
+    CREATE TABLE categories_new (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL COLLATE NOCASE,
+      color TEXT NOT NULL,
+      builtin INTEGER NOT NULL DEFAULT 0,
+      owner_user_id INTEGER,
+      calendar_type TEXT NOT NULL DEFAULT 'custom' CHECK (calendar_type IN ('builtin', 'personal', 'birthday', 'anniversary', 'custom', 'shared')),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+
+  const insert = db.prepare(`
+    INSERT INTO categories_new
+      (id, name, color, builtin, owner_user_id, calendar_type, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+
+  for (const category of categories) {
+    insert.run(
+      category.id,
+      category.name,
+      category.color,
+      category.builtin ? 1 : 0,
+      category.owner_user_id ?? null,
+      normalizeCalendarType(category.calendar_type, category.name, category.builtin === 1),
+      category.created_at,
+      category.updated_at
+    );
+  }
+
+  db.exec(`
+    DROP TABLE categories;
+    ALTER TABLE categories_new RENAME TO categories;
+    COMMIT;
+    PRAGMA foreign_keys = ON;
+  `);
+}
+
+function normalizeCalendarType(value: unknown, name: string, builtin: boolean): CalendarType {
+  if (
+    value === "builtin"
+    || value === "personal"
+    || value === "birthday"
+    || value === "anniversary"
+    || value === "custom"
+    || value === "shared"
+  ) {
+    return value;
+  }
+
+  const normalizedName = name.trim().toLowerCase();
+  if (builtin && normalizedName !== "birthday" && normalizedName !== "anniversaries") {
+    return "builtin";
+  }
+  if (normalizedName === "birthday") {
+    return "birthday";
+  }
+  if (normalizedName === "anniversaries" || normalizedName === "anniversary") {
+    return "anniversary";
+  }
+  return "custom";
+}
+
+function ensureAuthIndexes(): void {
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_categories_owner_user_id ON categories(owner_user_id);
+    CREATE INDEX IF NOT EXISTS idx_sessions_token_hash ON sessions(token_hash);
+    CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
+    CREATE INDEX IF NOT EXISTS idx_calendar_shares_category_id ON calendar_shares(category_id);
+    CREATE INDEX IF NOT EXISTS idx_calendar_shares_invitee_user_id ON calendar_shares(invitee_user_id);
+    CREATE INDEX IF NOT EXISTS idx_calendar_shares_invitee_email ON calendar_shares(invitee_email);
+    CREATE INDEX IF NOT EXISTS idx_calendar_shares_owner_user_id ON calendar_shares(owner_user_id);
+  `);
 }
 
 function ensureDefaultSetting(key: string, value: string): void {
@@ -284,34 +502,376 @@ function updateBooleanSetting(key: keyof AppSettings, value: boolean): void {
   ).run(key, String(value), nowIso());
 }
 
-function ensureCategory(name: string, color: string, builtin: boolean): number {
+function publicUser(user: UserRow): CurrentUser {
+  return {
+    id: user.id,
+    firstName: user.first_name,
+    lastName: user.last_name,
+    displayName: user.display_name,
+    email: user.email,
+    dateOfBirth: user.date_of_birth
+  };
+}
+
+function normalizeEmail(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function validateEmail(value: string): boolean {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+}
+
+function hashPassword(password: string, salt = randomBytes(16).toString("base64")): {
+  hash: string;
+  salt: string;
+} {
+  return {
+    salt,
+    hash: pbkdf2Sync(password, salt, passwordIterations, 32, "sha256").toString("base64")
+  };
+}
+
+function verifyPassword(password: string, user: UserRow): boolean {
+  const expected = Buffer.from(user.password_hash, "base64");
+  const actual = Buffer.from(hashPassword(password, user.password_salt).hash, "base64");
+  return expected.length === actual.length && timingSafeEqual(expected, actual);
+}
+
+function hashSessionToken(token: string): string {
+  return createHash("sha256").update(token).digest("hex");
+}
+
+function createSession(userId: number, mfaVerified: boolean): { token: string; expiresAt: string } {
+  const token = randomBytes(32).toString("base64url");
+  const expires = new Date();
+  expires.setUTCDate(expires.getUTCDate() + sessionTtlDays);
+  const expiresAt = expires.toISOString();
+
+  db.prepare(
+    `
+    INSERT INTO sessions (user_id, token_hash, mfa_verified, expires_at, created_at)
+    VALUES (?, ?, ?, ?, ?)
+  `
+  ).run(userId, hashSessionToken(token), mfaVerified ? 1 : 0, expiresAt, nowIso());
+
+  return { token, expiresAt };
+}
+
+function setSessionCookie(res: ServerResponse, token: string, expiresAt: string): void {
+  const maxAge = Math.max(0, Math.floor((Date.parse(expiresAt) - Date.now()) / 1000));
+  res.setHeader(
+    "Set-Cookie",
+    `${sessionCookieName}=${encodeURIComponent(token)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge}`
+  );
+}
+
+function clearSessionCookie(res: ServerResponse): void {
+  res.setHeader(
+    "Set-Cookie",
+    `${sessionCookieName}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`
+  );
+}
+
+function parseCookies(req: IncomingMessage): Map<string, string> {
+  const cookies = new Map<string, string>();
+  const header = req.headers.cookie;
+  if (!header) {
+    return cookies;
+  }
+
+  for (const part of header.split(";")) {
+    const [name, ...valueParts] = part.trim().split("=");
+    if (!name || !valueParts.length) {
+      continue;
+    }
+    cookies.set(name, decodeURIComponent(valueParts.join("=")));
+  }
+  return cookies;
+}
+
+function getSessionFromRequest(req: IncomingMessage): { user: UserRow; session: SessionRow; token: string } | null {
+  const token = parseCookies(req).get(sessionCookieName);
+  if (!token) {
+    return null;
+  }
+
+  const row = db
+    .prepare(
+      `
+      SELECT
+        s.id AS session_id,
+        s.user_id,
+        s.token_hash,
+        s.mfa_verified,
+        s.expires_at,
+        s.created_at AS session_created_at,
+        u.*
+      FROM sessions s
+      JOIN users u ON u.id = s.user_id
+      WHERE s.token_hash = ?
+      LIMIT 1
+    `
+    )
+    .get(hashSessionToken(token)) as
+    | (UserRow & {
+      session_id: number;
+      user_id: number;
+      token_hash: string;
+      mfa_verified: number;
+      expires_at: string;
+      session_created_at: string;
+    })
+    | undefined;
+
+  if (!row) {
+    return null;
+  }
+
+  if (row.expires_at <= nowIso()) {
+    db.prepare("DELETE FROM sessions WHERE id = ?").run(row.session_id);
+    return null;
+  }
+
+  return {
+    token,
+    user: {
+      id: row.id,
+      first_name: row.first_name,
+      last_name: row.last_name,
+      display_name: row.display_name,
+      email: row.email,
+      date_of_birth: row.date_of_birth,
+      password_hash: row.password_hash,
+      password_salt: row.password_salt,
+      mfa_secret: row.mfa_secret,
+      mfa_enabled: row.mfa_enabled,
+      created_at: row.created_at,
+      updated_at: row.updated_at
+    },
+    session: {
+      id: row.session_id,
+      user_id: row.user_id,
+      token_hash: row.token_hash,
+      mfa_verified: row.mfa_verified,
+      expires_at: row.expires_at,
+      created_at: row.session_created_at
+    }
+  };
+}
+
+function requireVerifiedSession(req: IncomingMessage): { user: UserRow; session: SessionRow; token: string } {
+  const auth = getSessionFromRequest(req);
+  if (!auth) {
+    throw httpError(401, "Log in to continue.");
+  }
+  if (auth.user.mfa_enabled !== 1) {
+    throw httpError(401, "Finish MFA setup to continue.");
+  }
+  if (auth.session.mfa_verified !== 1) {
+    throw httpError(401, "Enter your authenticator code to continue.");
+  }
+  return auth;
+}
+
+function getUserByEmail(email: string): UserRow | undefined {
+  return db
+    .prepare("SELECT * FROM users WHERE email = ? LIMIT 1")
+    .get(normalizeEmail(email)) as UserRow | undefined;
+}
+
+function getUserById(id: number): UserRow | undefined {
+  return db.prepare("SELECT * FROM users WHERE id = ? LIMIT 1").get(id) as UserRow | undefined;
+}
+
+function userCount(): number {
+  const row = db.prepare("SELECT COUNT(*) AS count FROM users").get() as { count: number };
+  return row.count;
+}
+
+function mfaSetupPayload(user: UserRow) {
+  const label = `${appIssuer}:${user.email}`;
+  const query = new URLSearchParams({
+    secret: user.mfa_secret,
+    issuer: appIssuer,
+    algorithm: "SHA1",
+    digits: "6",
+    period: "30"
+  });
+
+  return {
+    secret: user.mfa_secret,
+    setupUri: `otpauth://totp/${encodeURIComponent(label)}?${query.toString()}`
+  };
+}
+
+const base32Alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+
+function base32Encode(bytes: Buffer): string {
+  let bits = 0;
+  let value = 0;
+  let output = "";
+
+  for (const byte of bytes) {
+    value = (value << 8) | byte;
+    bits += 8;
+    while (bits >= 5) {
+      output += base32Alphabet[(value >>> (bits - 5)) & 31];
+      bits -= 5;
+    }
+  }
+
+  if (bits > 0) {
+    output += base32Alphabet[(value << (5 - bits)) & 31];
+  }
+
+  return output;
+}
+
+function base32Decode(secret: string): Buffer {
+  const clean = secret.replace(/=+$/g, "").replace(/\s+/g, "").toUpperCase();
+  let bits = 0;
+  let value = 0;
+  const bytes: number[] = [];
+
+  for (const char of clean) {
+    const index = base32Alphabet.indexOf(char);
+    if (index === -1) {
+      throw httpError(400, "Invalid authenticator secret.");
+    }
+    value = (value << 5) | index;
+    bits += 5;
+    if (bits >= 8) {
+      bytes.push((value >>> (bits - 8)) & 255);
+      bits -= 8;
+    }
+  }
+
+  return Buffer.from(bytes);
+}
+
+function generateMfaSecret(): string {
+  return base32Encode(randomBytes(20));
+}
+
+function totp(secret: string, timestamp = Date.now()): string {
+  const counter = Math.floor(timestamp / 30_000);
+  const buffer = Buffer.alloc(8);
+  buffer.writeBigUInt64BE(BigInt(counter));
+  const digest = createHmac("sha1", base32Decode(secret)).update(buffer).digest();
+  const offset = digest[digest.length - 1] & 15;
+  const code = (
+    ((digest[offset] & 127) << 24)
+    | ((digest[offset + 1] & 255) << 16)
+    | ((digest[offset + 2] & 255) << 8)
+    | (digest[offset + 3] & 255)
+  ) % 1_000_000;
+  return String(code).padStart(6, "0");
+}
+
+function verifyTotp(secret: string, code: string): boolean {
+  const clean = code.trim().replace(/\s+/g, "");
+  if (!/^\d{6}$/.test(clean)) {
+    return false;
+  }
+
+  const provided = Buffer.from(clean);
+  for (const drift of [-1, 0, 1]) {
+    const expected = Buffer.from(totp(secret, Date.now() + drift * 30_000));
+    if (expected.length === provided.length && timingSafeEqual(expected, provided)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function ensureUserDefaultCalendars(userId: number): void {
+  ensureCategory("Personal Calendar", "#0f766e", false, userId, "personal");
+  ensureCategory("Birthday", "#14b8a6", false, userId, "birthday");
+  ensureCategory("Anniversaries", "#4338ca", false, userId, "anniversary");
+}
+
+function claimLegacyCalendarsForUser(userId: number): void {
+  db.prepare(
+    `
+    UPDATE categories
+    SET
+      owner_user_id = ?,
+      builtin = 0,
+      calendar_type = CASE
+        WHEN lower(name) = 'birthday' THEN 'birthday'
+        WHEN lower(name) IN ('anniversaries', 'anniversary') THEN 'anniversary'
+        ELSE 'custom'
+      END,
+      updated_at = ?
+    WHERE owner_user_id IS NULL
+      AND (builtin = 0 OR lower(name) IN ('birthday', 'anniversaries', 'anniversary'))
+  `
+  ).run(userId, nowIso());
+}
+
+function attachPendingSharesToUser(user: UserRow): void {
+  db.prepare(
+    `
+    UPDATE calendar_shares
+    SET invitee_user_id = ?, updated_at = ?
+    WHERE invitee_user_id IS NULL AND invitee_email = ?
+  `
+  ).run(user.id, nowIso(), user.email);
+}
+
+function ensureCategory(
+  name: string,
+  color: string,
+  builtin: boolean,
+  ownerUserId: number | null = null,
+  calendarType: CalendarType = builtin ? "builtin" : "custom"
+): number {
   const existing = db
-    .prepare("SELECT id, color, builtin FROM categories WHERE name = ?")
-    .get(name) as { id: number; color: string; builtin: number } | undefined;
+    .prepare(
+      `
+      SELECT id, color, builtin, owner_user_id, calendar_type
+      FROM categories
+      WHERE name = ?
+        AND ((owner_user_id IS NULL AND ? IS NULL) OR owner_user_id = ?)
+      ORDER BY builtin DESC, id ASC
+      LIMIT 1
+    `
+    )
+    .get(name, ownerUserId, ownerUserId) as
+    | { id: number; color: string; builtin: number; owner_user_id: number | null; calendar_type: CalendarType }
+    | undefined;
 
   if (existing) {
-    if (builtin && (existing.color !== color || existing.builtin !== 1)) {
-      db.prepare("UPDATE categories SET color = ?, builtin = 1, updated_at = ? WHERE id = ?")
-        .run(color, nowIso(), existing.id);
+    if (
+      existing.color !== color
+      || existing.builtin !== (builtin ? 1 : 0)
+      || existing.calendar_type !== calendarType
+      || existing.owner_user_id !== ownerUserId
+    ) {
+      db.prepare(
+        "UPDATE categories SET color = ?, builtin = ?, owner_user_id = ?, calendar_type = ?, updated_at = ? WHERE id = ?"
+      ).run(color, builtin ? 1 : 0, ownerUserId, calendarType, nowIso(), existing.id);
     }
     return existing.id;
   }
 
   const result = db
     .prepare(
-      "INSERT INTO categories (name, color, builtin, created_at, updated_at) VALUES (?, ?, ?, ?, ?)"
+      `
+      INSERT INTO categories
+        (name, color, builtin, owner_user_id, calendar_type, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `
     )
-    .run(name, color, builtin ? 1 : 0, nowIso(), nowIso());
+    .run(name, color, builtin ? 1 : 0, ownerUserId, calendarType, nowIso(), nowIso());
 
   return Number(result.lastInsertRowid);
 }
 
 function seedBuiltIns(): void {
-  const federalCategoryId = ensureCategory("Federal Holidays", "#f97316", true);
-  const christianCategoryId = ensureCategory("Christian Holidays", "#facc15", true);
-  const americanCategoryId = ensureCategory("American Holidays", "#dc2626", true);
-  ensureCategory("Birthday", "#14b8a6", true);
-  ensureCategory("Anniversaries", "#4338ca", true);
+  const federalCategoryId = ensureCategory("Federal Holidays", "#f97316", true, null, "builtin");
+  const christianCategoryId = ensureCategory("Christian Holidays", "#facc15", true, null, "builtin");
+  const americanCategoryId = ensureCategory("American Holidays", "#dc2626", true, null, "builtin");
   const currentYear = new Date().getFullYear();
   const startYear = currentYear - 1;
   const endYear = currentYear + 10;
@@ -613,7 +1173,7 @@ function recurrenceLabel(recurrence: Recurrence, interval: number): string {
     : `Every ${normalizedInterval} ${unit}s`;
 }
 
-function getUpcomingEvents(daysAhead: number): UpcomingEvent[] {
+function getUpcomingEvents(daysAhead: number, user: UserRow): UpcomingEvent[] {
   const today = todayDateOnly();
   const rows = db
     .prepare(
@@ -622,13 +1182,18 @@ function getUpcomingEvents(daysAhead: number): UpcomingEvent[] {
         e.*,
         c.name AS category_name,
         c.color AS category_color,
-        c.builtin AS category_builtin
+        c.builtin AS category_builtin,
+        c.owner_user_id AS category_owner_user_id,
+        c.calendar_type AS category_calendar_type,
+        owner.display_name AS category_owner_display_name
       FROM events e
       JOIN categories c ON c.id = e.category_id
+      LEFT JOIN users owner ON owner.id = c.owner_user_id
+      WHERE ${visibleCategoryWhere("c")}
       ORDER BY e.event_date ASC, e.title ASC
     `
     )
-    .all() as EventRow[];
+    .all(...visibleCategoryParams(user)) as EventRow[];
 
   return rows
     .map((event) => {
@@ -647,6 +1212,10 @@ function getUpcomingEvents(daysAhead: number): UpcomingEvent[] {
         categoryName: event.category_name,
         categoryColor: event.category_color,
         categoryBuiltin: event.category_builtin === 1,
+        categoryOwnerUserId: event.category_owner_user_id,
+        categoryCalendarType: event.category_calendar_type,
+        categoryOwnerDisplayName: event.category_owner_display_name,
+        canEdit: event.source === "manual" && event.category_owner_user_id === user.id,
         recurrence: event.recurrence,
         recurrenceInterval,
         recurrenceLabel: recurrenceLabel(event.recurrence, recurrenceInterval),
@@ -925,6 +1494,206 @@ const AMERICAN_HOLIDAY_DETAILS: Record<string, HolidayDetail> = {
   }
 };
 
+async function handleAuthApi(req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> {
+  const method = req.method ?? "GET";
+
+  if (method === "GET" && url.pathname === "/api/auth/session") {
+    const auth = getSessionFromRequest(req);
+    if (!auth) {
+      sendJson(res, 200, { authenticated: false });
+      return true;
+    }
+
+    if (auth.user.mfa_enabled !== 1) {
+      sendJson(res, 200, {
+        authenticated: false,
+        mfaSetup: mfaSetupPayload(auth.user),
+        user: publicUser(auth.user)
+      });
+      return true;
+    }
+
+    if (auth.session.mfa_verified !== 1) {
+      sendJson(res, 200, {
+        authenticated: false,
+        mfaRequired: true,
+        user: publicUser(auth.user)
+      });
+      return true;
+    }
+
+    sendJson(res, 200, { authenticated: true, user: publicUser(auth.user) });
+    return true;
+  }
+
+  if (method === "POST" && url.pathname === "/api/auth/signup") {
+    const body = await readJson(req);
+    const created = createUserAccount(body);
+    const session = createSession(created.user.id, false);
+    setSessionCookie(res, session.token, session.expiresAt);
+    sendJson(res, 201, {
+      authenticated: false,
+      mfaSetup: mfaSetupPayload(created.user),
+      user: publicUser(created.user)
+    });
+    return true;
+  }
+
+  if (method === "POST" && url.pathname === "/api/auth/login") {
+    const body = await readJson(req);
+    const user = validateLogin(body);
+    const session = createSession(user.id, user.mfa_enabled !== 1);
+    setSessionCookie(res, session.token, session.expiresAt);
+
+    if (user.mfa_enabled === 1) {
+      sendJson(res, 200, {
+        authenticated: false,
+        mfaRequired: true,
+        user: publicUser(user)
+      });
+    } else {
+      sendJson(res, 200, {
+        authenticated: false,
+        mfaSetup: mfaSetupPayload(user),
+        user: publicUser(user)
+      });
+    }
+    return true;
+  }
+
+  if (method === "POST" && url.pathname === "/api/auth/mfa/enable") {
+    const auth = getSessionFromRequest(req);
+    if (!auth) {
+      throw httpError(401, "Log in to continue.");
+    }
+    const body = await readJson(req);
+    const code = cleanText((body as Record<string, unknown>)?.code, 20, true);
+    if (!verifyTotp(auth.user.mfa_secret, code)) {
+      throw httpError(400, "Authenticator code was not accepted.");
+    }
+
+    db.prepare("UPDATE users SET mfa_enabled = 1, updated_at = ? WHERE id = ?")
+      .run(nowIso(), auth.user.id);
+    db.prepare("UPDATE sessions SET mfa_verified = 1 WHERE id = ?").run(auth.session.id);
+    const user = getUserById(auth.user.id);
+    if (!user) {
+      throw httpError(500, "User could not be loaded.");
+    }
+    sendJson(res, 200, { authenticated: true, user: publicUser(user) });
+    return true;
+  }
+
+  if (method === "POST" && url.pathname === "/api/auth/mfa/verify") {
+    const auth = getSessionFromRequest(req);
+    if (!auth) {
+      throw httpError(401, "Log in to continue.");
+    }
+    const body = await readJson(req);
+    const code = cleanText((body as Record<string, unknown>)?.code, 20, true);
+    if (!verifyTotp(auth.user.mfa_secret, code)) {
+      throw httpError(400, "Authenticator code was not accepted.");
+    }
+
+    db.prepare("UPDATE sessions SET mfa_verified = 1 WHERE id = ?").run(auth.session.id);
+    sendJson(res, 200, { authenticated: true, user: publicUser(auth.user) });
+    return true;
+  }
+
+  if (method === "POST" && url.pathname === "/api/auth/logout") {
+    const auth = getSessionFromRequest(req);
+    if (auth) {
+      db.prepare("DELETE FROM sessions WHERE id = ?").run(auth.session.id);
+    }
+    clearSessionCookie(res);
+    sendJson(res, 200, { ok: true });
+    return true;
+  }
+
+  return false;
+}
+
+function createUserAccount(body: unknown): { user: UserRow } {
+  if (!isRecord(body)) {
+    throw httpError(400, "Expected a JSON object.");
+  }
+
+  const firstName = cleanText(body.firstName, 80);
+  const lastName = cleanText(body.lastName, 80);
+  const displayName = cleanText(body.displayName, 80);
+  const email = normalizeEmail(cleanText(body.email, 160));
+  const dateOfBirth = cleanText(body.dateOfBirth, 10);
+  const password = cleanText(body.password, 500);
+  const confirmPassword = cleanText(body.confirmPassword, 500);
+
+  if (!firstName || !lastName || !displayName) {
+    throw httpError(400, "Name fields are required.");
+  }
+  if (!validateEmail(email)) {
+    throw httpError(400, "Enter a valid email address.");
+  }
+  if (!isValidDateOnly(dateOfBirth)) {
+    throw httpError(400, "Date of birth must be in YYYY-MM-DD format.");
+  }
+  if (password.length < 10) {
+    throw httpError(400, "Password must be at least 10 characters.");
+  }
+  if (password !== confirmPassword) {
+    throw httpError(400, "Passwords do not match.");
+  }
+  if (getUserByEmail(email)) {
+    throw httpError(409, "An account with that email already exists.");
+  }
+
+  const firstUser = userCount() === 0;
+  const passwordData = hashPassword(password);
+  const result = db.prepare(
+    `
+    INSERT INTO users
+      (first_name, last_name, display_name, email, date_of_birth, password_hash, password_salt, mfa_secret, mfa_enabled, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+  `
+  ).run(
+    firstName,
+    lastName,
+    displayName,
+    email,
+    dateOfBirth,
+    passwordData.hash,
+    passwordData.salt,
+    generateMfaSecret(),
+    nowIso(),
+    nowIso()
+  );
+
+  const user = getUserById(Number(result.lastInsertRowid));
+  if (!user) {
+    throw httpError(500, "User could not be created.");
+  }
+
+  if (firstUser) {
+    claimLegacyCalendarsForUser(user.id);
+  }
+  ensureUserDefaultCalendars(user.id);
+  attachPendingSharesToUser(user);
+  return { user };
+}
+
+function validateLogin(body: unknown): UserRow {
+  if (!isRecord(body)) {
+    throw httpError(400, "Expected a JSON object.");
+  }
+
+  const email = normalizeEmail(cleanText(body.email, 160));
+  const password = cleanText(body.password, 500);
+  const user = getUserByEmail(email);
+  if (!user || !verifyPassword(password, user)) {
+    throw httpError(401, "Email or password was not accepted.");
+  }
+
+  attachPendingSharesToUser(user);
+  return user;
+}
+
 async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
   const method = req.method ?? "GET";
 
@@ -943,17 +1712,24 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
     return;
   }
 
+  if (url.pathname.startsWith("/api/auth/")) {
+    if (await handleAuthApi(req, res, url)) {
+      return;
+    }
+  }
+
+  const auth = requireVerifiedSession(req);
+  const user = auth.user;
+
   if (method === "GET" && url.pathname === "/api/categories") {
-    const categories = db
-      .prepare("SELECT * FROM categories ORDER BY builtin DESC, name ASC")
-      .all() as CategoryRow[];
-    sendJson(res, 200, { categories: categories.map(formatCategory) });
+    const categories = listVisibleCategories(user);
+    sendJson(res, 200, { categories: categories.map((category) => formatCategory(category, user)) });
     return;
   }
 
   if (method === "GET" && url.pathname === "/api/events") {
     const days = clampNumber(Number(url.searchParams.get("days") ?? 730), 30, 3650);
-    sendJson(res, 200, { events: getUpcomingEvents(days) });
+    sendJson(res, 200, { events: getUpcomingEvents(days, user) });
     return;
   }
 
@@ -970,43 +1746,83 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
 
   if (method === "POST" && url.pathname === "/api/events") {
     const body = await readJson(req);
-    const created = createManualEvent(body);
+    const created = createManualEvent(body, user);
     sendJson(res, 201, { event: created });
     return;
   }
 
   if (method === "POST" && url.pathname === "/api/import") {
     const body = await readJson(req, 5_000_000);
-    const result = importManualEvents(body);
+    const result = importManualEvents(body, user);
     sendJson(res, 200, result);
+    return;
+  }
+
+  if (method === "GET" && url.pathname === "/api/shares") {
+    sendJson(res, 200, getShareState(user));
+    return;
+  }
+
+  if (method === "POST" && url.pathname === "/api/shares/invite") {
+    const body = await readJson(req);
+    sendJson(res, 201, inviteToCalendar(body, user));
+    return;
+  }
+
+  if (method === "POST" && url.pathname === "/api/shares/respond") {
+    const body = await readJson(req);
+    sendJson(res, 200, respondToShare(body, user));
+    return;
+  }
+
+  if (method === "POST" && url.pathname === "/api/shares/revoke") {
+    const body = await readJson(req);
+    sendJson(res, 200, revokeShare(body, user));
+    return;
+  }
+
+  if (method === "POST" && url.pathname === "/api/calendars/shared") {
+    const body = await readJson(req);
+    sendJson(res, 201, createSharedCalendar(body, user));
     return;
   }
 
   const eventMatch = url.pathname.match(/^\/api\/events\/(\d+)$/);
   if (eventMatch && method === "PUT") {
     const body = await readJson(req);
-    const updated = updateManualEvent(Number(eventMatch[1]), body);
+    const updated = updateManualEvent(Number(eventMatch[1]), body, user);
     sendJson(res, 200, { event: updated });
     return;
   }
 
   if (eventMatch && method === "DELETE") {
-    deleteManualEvent(Number(eventMatch[1]));
+    deleteManualEvent(Number(eventMatch[1]), user);
     sendJson(res, 200, { ok: true });
     return;
   }
 
   if (method === "GET" && url.pathname === "/api/export") {
-    const categories = db.prepare("SELECT * FROM categories ORDER BY name ASC").all();
-    const events = db.prepare("SELECT * FROM events ORDER BY event_date ASC, title ASC").all();
+    const categories = listVisibleCategories(user);
+    const events = db
+      .prepare(
+        `
+        SELECT e.*
+        FROM events e
+        JOIN categories c ON c.id = e.category_id
+        WHERE ${visibleCategoryWhere("c")}
+        ORDER BY e.event_date ASC, e.title ASC
+      `
+      )
+      .all(...visibleCategoryParams(user));
 
     sendJson(
       res,
       200,
       {
         exportedAt: nowIso(),
-        schemaVersion: 2,
-        categories,
+        schemaVersion: 3,
+        user: publicUser(user),
+        categories: categories.map((category) => formatCategory(category, user)),
         events
       },
       {
@@ -1029,18 +1845,291 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
   sendJson(res, 404, { error: "Not found" });
 }
 
-function formatCategory(category: CategoryRow) {
+function visibleCategoryWhere(alias: string): string {
+  return `
+    (
+      ${alias}.builtin = 1
+      OR ${alias}.owner_user_id = ?
+      OR EXISTS (
+        SELECT 1
+        FROM calendar_shares visible_share
+        WHERE visible_share.category_id = ${alias}.id
+          AND visible_share.status = 'accepted'
+          AND (visible_share.invitee_user_id = ? OR visible_share.invitee_email = ?)
+      )
+    )
+  `;
+}
+
+function visibleCategoryParams(user: UserRow): [number, number, string] {
+  return [user.id, user.id, user.email];
+}
+
+function listVisibleCategories(user: UserRow): CategoryRow[] {
+  return db
+    .prepare(
+      `
+      SELECT c.*, owner.display_name AS owner_display_name
+      FROM categories c
+      LEFT JOIN users owner ON owner.id = c.owner_user_id
+      WHERE ${visibleCategoryWhere("c")}
+      ORDER BY builtin DESC, owner_user_id IS NOT NULL ASC, name ASC
+    `
+    )
+    .all(...visibleCategoryParams(user)) as CategoryRow[];
+}
+
+function formatCategory(category: CategoryRow, user: UserRow) {
+  const owned = category.owner_user_id === user.id;
   return {
     id: category.id,
     name: category.name,
     color: category.color,
-    builtin: category.builtin === 1
+    builtin: category.builtin === 1,
+    ownerUserId: category.owner_user_id,
+    ownerDisplayName: category.owner_display_name,
+    calendarType: category.calendar_type,
+    canAddEvents: owned && category.builtin !== 1,
+    canShare: owned && category.builtin !== 1,
+    sharedWithMe: category.owner_user_id !== null && !owned
   };
 }
 
-function createManualEvent(body: unknown): UpcomingEvent {
+function getOwnedShareableCalendars(user: UserRow): CategoryRow[] {
+  return db
+    .prepare(
+      `
+      SELECT c.*, owner.display_name AS owner_display_name
+      FROM categories c
+      LEFT JOIN users owner ON owner.id = c.owner_user_id
+      WHERE c.owner_user_id = ? AND c.builtin = 0
+      ORDER BY
+        CASE calendar_type
+          WHEN 'personal' THEN 0
+          WHEN 'birthday' THEN 1
+          WHEN 'anniversary' THEN 2
+          WHEN 'shared' THEN 3
+          ELSE 4
+        END,
+        name ASC
+    `
+    )
+    .all(user.id) as CategoryRow[];
+}
+
+function shareRowSelect(where: string): string {
+  return `
+    SELECT
+      s.*,
+      c.name AS category_name,
+      c.color AS category_color,
+      owner.display_name AS owner_display_name,
+      invitee.display_name AS invitee_display_name
+    FROM calendar_shares s
+    JOIN categories c ON c.id = s.category_id
+    JOIN users owner ON owner.id = s.owner_user_id
+    LEFT JOIN users invitee ON invitee.id = s.invitee_user_id
+    WHERE ${where}
+    ORDER BY s.updated_at DESC, s.created_at DESC
+  `;
+}
+
+function formatShare(row: CalendarShareRow) {
+  return {
+    id: row.id,
+    categoryId: row.category_id,
+    categoryName: row.category_name,
+    categoryColor: row.category_color,
+    ownerUserId: row.owner_user_id,
+    ownerDisplayName: row.owner_display_name,
+    inviteeUserId: row.invitee_user_id,
+    inviteeEmail: row.invitee_email,
+    inviteeDisplayName: row.invitee_display_name,
+    status: row.status,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function getShareState(user: UserRow) {
+  const ownedCalendars = getOwnedShareableCalendars(user).map((category) => formatCategory(category, user));
+  const incoming = db
+    .prepare(shareRowSelect("s.status = 'pending' AND (s.invitee_user_id = ? OR s.invitee_email = ?)"))
+    .all(user.id, user.email) as CalendarShareRow[];
+  const outgoing = db
+    .prepare(shareRowSelect("s.owner_user_id = ? AND s.status IN ('pending', 'accepted', 'declined')"))
+    .all(user.id) as CalendarShareRow[];
+  const sharedWithMe = db
+    .prepare(shareRowSelect("s.status = 'accepted' AND (s.invitee_user_id = ? OR s.invitee_email = ?)"))
+    .all(user.id, user.email) as CalendarShareRow[];
+
+  return {
+    ownedCalendars,
+    incoming: incoming.map(formatShare),
+    outgoing: outgoing.map(formatShare),
+    sharedWithMe: sharedWithMe.map(formatShare)
+  };
+}
+
+function ownedCategoryForShare(categoryId: number, user: UserRow): CategoryRow {
+  const category = db
+    .prepare("SELECT * FROM categories WHERE id = ? AND owner_user_id = ? AND builtin = 0 LIMIT 1")
+    .get(categoryId, user.id) as CategoryRow | undefined;
+
+  if (!category) {
+    throw httpError(404, "Calendar not found.");
+  }
+  return category;
+}
+
+function inviteToCalendar(body: unknown, user: UserRow) {
+  if (!isRecord(body)) {
+    throw httpError(400, "Expected a JSON object.");
+  }
+
+  const categoryId = Number(body.categoryId ?? 0);
+  const inviteeEmail = normalizeEmail(cleanText(body.email, 160));
+  if (!Number.isInteger(categoryId) || categoryId <= 0) {
+    throw httpError(400, "Choose a calendar to share.");
+  }
+  if (!validateEmail(inviteeEmail)) {
+    throw httpError(400, "Enter a valid invitee email address.");
+  }
+  if (inviteeEmail === user.email) {
+    throw httpError(400, "You already own that calendar.");
+  }
+
+  const category = ownedCategoryForShare(categoryId, user);
+  const invitee = getUserByEmail(inviteeEmail);
+  const existing = db
+    .prepare(
+      `
+      SELECT id, status
+      FROM calendar_shares
+      WHERE category_id = ? AND invitee_email = ?
+      ORDER BY id DESC
+      LIMIT 1
+    `
+    )
+    .get(category.id, inviteeEmail) as { id: number; status: InvitationStatus } | undefined;
+
+  if (existing) {
+    db.prepare(
+      `
+      UPDATE calendar_shares
+      SET invitee_user_id = ?, status = 'pending', updated_at = ?
+      WHERE id = ?
+    `
+    ).run(invitee?.id ?? null, nowIso(), existing.id);
+  } else {
+    db.prepare(
+      `
+      INSERT INTO calendar_shares
+        (category_id, owner_user_id, invitee_user_id, invitee_email, status, created_at, updated_at)
+      VALUES (?, ?, ?, ?, 'pending', ?, ?)
+    `
+    ).run(category.id, user.id, invitee?.id ?? null, inviteeEmail, nowIso(), nowIso());
+  }
+
+  return getShareState(user);
+}
+
+function respondToShare(body: unknown, user: UserRow) {
+  if (!isRecord(body)) {
+    throw httpError(400, "Expected a JSON object.");
+  }
+
+  const shareId = Number(body.shareId ?? 0);
+  const action = cleanText(body.action, 20, true);
+  if (!Number.isInteger(shareId) || shareId <= 0) {
+    throw httpError(400, "Choose an invitation.");
+  }
+  if (action !== "accept" && action !== "decline") {
+    throw httpError(400, "Choose accept or decline.");
+  }
+
+  const share = db
+    .prepare(
+      `
+      SELECT *
+      FROM calendar_shares
+      WHERE id = ?
+        AND status = 'pending'
+        AND (invitee_user_id = ? OR invitee_email = ?)
+      LIMIT 1
+    `
+    )
+    .get(shareId, user.id, user.email) as CalendarShareRow | undefined;
+
+  if (!share) {
+    throw httpError(404, "Invitation not found.");
+  }
+
+  db.prepare(
+    "UPDATE calendar_shares SET invitee_user_id = ?, status = ?, updated_at = ? WHERE id = ?"
+  ).run(user.id, action === "accept" ? "accepted" : "declined", nowIso(), shareId);
+
+  return getShareState(user);
+}
+
+function revokeShare(body: unknown, user: UserRow) {
+  if (!isRecord(body)) {
+    throw httpError(400, "Expected a JSON object.");
+  }
+
+  const shareId = Number(body.shareId ?? 0);
+  if (!Number.isInteger(shareId) || shareId <= 0) {
+    throw httpError(400, "Choose an invitation or share.");
+  }
+
+  const result = db.prepare(
+    `
+    UPDATE calendar_shares
+    SET status = 'revoked', updated_at = ?
+    WHERE id = ? AND owner_user_id = ? AND status IN ('pending', 'accepted', 'declined')
+  `
+  ).run(nowIso(), shareId, user.id);
+
+  if (result.changes === 0) {
+    throw httpError(404, "Share not found.");
+  }
+
+  return getShareState(user);
+}
+
+function createSharedCalendar(body: unknown, user: UserRow) {
+  if (!isRecord(body)) {
+    throw httpError(400, "Expected a JSON object.");
+  }
+
+  const name = cleanText(body.name, 80);
+  const color = cleanText(body.color, 20, true) || "#2563eb";
+  const inviteeEmail = normalizeEmail(cleanText(body.email, 160, true));
+
+  if (name.length < 2) {
+    throw httpError(400, "Calendar names need at least two characters.");
+  }
+  if (!/^#[0-9a-fA-F]{6}$/.test(color)) {
+    throw httpError(400, "Calendar color must be a hex color.");
+  }
+  if (inviteeEmail && !validateEmail(inviteeEmail)) {
+    throw httpError(400, "Enter a valid invitee email address.");
+  }
+
+  const categoryId = ensureCategory(name, color, false, user.id, "shared");
+  if (inviteeEmail) {
+    inviteToCalendar({ categoryId, email: inviteeEmail }, user);
+  }
+
+  return {
+    category: formatCategory(ownedCategoryForShare(categoryId, user), user),
+    shares: getShareState(user)
+  };
+}
+
+function createManualEvent(body: unknown, user: UserRow): UpcomingEvent {
   const input = validateEventInput(body);
-  const categoryId = resolveCategory(input);
+  const categoryId = resolveCategory(input, user);
   const result = db
     .prepare(
       `
@@ -1062,16 +2151,25 @@ function createManualEvent(body: unknown): UpcomingEvent {
       nowIso()
     );
 
-  const event = getUpcomingEvents(3650).find((item) => item.id === Number(result.lastInsertRowid));
+  const event = getUpcomingEvents(3650, user).find((item) => item.id === Number(result.lastInsertRowid));
   if (!event) {
     throw httpError(500, "Event was saved but could not be loaded.");
   }
   return event;
 }
 
-function updateManualEvent(id: number, body: unknown): UpcomingEvent {
-  const existing = db.prepare("SELECT source FROM events WHERE id = ?").get(id) as
-    | { source: string }
+function updateManualEvent(id: number, body: unknown, user: UserRow): UpcomingEvent {
+  const existing = db
+    .prepare(
+      `
+      SELECT e.source, c.owner_user_id
+      FROM events e
+      JOIN categories c ON c.id = e.category_id
+      WHERE e.id = ?
+    `
+    )
+    .get(id) as
+    | { source: string; owner_user_id: number | null }
     | undefined;
 
   if (!existing) {
@@ -1081,9 +2179,12 @@ function updateManualEvent(id: number, body: unknown): UpcomingEvent {
   if (existing.source !== "manual") {
     throw httpError(403, "Built-in holidays cannot be edited.");
   }
+  if (existing.owner_user_id !== user.id) {
+    throw httpError(403, "You can only edit events on calendars you own.");
+  }
 
   const input = validateEventInput(body);
-  const categoryId = resolveCategory(input);
+  const categoryId = resolveCategory(input, user);
 
   db.prepare(
     `
@@ -1104,16 +2205,25 @@ function updateManualEvent(id: number, body: unknown): UpcomingEvent {
     id
   );
 
-  const event = getUpcomingEvents(3650).find((item) => item.id === id);
+  const event = getUpcomingEvents(3650, user).find((item) => item.id === id);
   if (!event) {
     throw httpError(500, "Event was updated but could not be loaded.");
   }
   return event;
 }
 
-function deleteManualEvent(id: number): void {
-  const existing = db.prepare("SELECT source FROM events WHERE id = ?").get(id) as
-    | { source: string }
+function deleteManualEvent(id: number, user: UserRow): void {
+  const existing = db
+    .prepare(
+      `
+      SELECT e.source, c.owner_user_id
+      FROM events e
+      JOIN categories c ON c.id = e.category_id
+      WHERE e.id = ?
+    `
+    )
+    .get(id) as
+    | { source: string; owner_user_id: number | null }
     | undefined;
 
   if (!existing) {
@@ -1123,11 +2233,14 @@ function deleteManualEvent(id: number): void {
   if (existing.source !== "manual") {
     throw httpError(403, "Built-in holidays cannot be deleted.");
   }
+  if (existing.owner_user_id !== user.id) {
+    throw httpError(403, "You can only delete events on calendars you own.");
+  }
 
   db.prepare("DELETE FROM events WHERE id = ?").run(id);
 }
 
-function importManualEvents(body: unknown): { imported: number; skipped: number; errors: string[] } {
+function importManualEvents(body: unknown, user: UserRow): { imported: number; skipped: number; errors: string[] } {
   if (!body || typeof body !== "object") {
     throw httpError(400, "Expected a JSON object.");
   }
@@ -1196,7 +2309,7 @@ function importManualEvents(body: unknown): { imported: number; skipped: number;
         throw new Error("invalid category color");
       }
 
-      const categoryId = resolveCategoryByName(eventCategoryName, eventCategoryColor);
+      const categoryId = resolveCategoryByName(eventCategoryName, eventCategoryColor, user);
       const duplicate = db
         .prepare(
           "SELECT id FROM events WHERE title = ? AND event_date = ? AND category_id = ? AND source = 'manual' LIMIT 1"
@@ -1555,16 +2668,16 @@ function getCsvValue(values: Map<string, string>, names: string[]): string {
   return "";
 }
 
-function resolveCategoryByName(name: string, color: string): number {
+function resolveCategoryByName(name: string, color: string, user: UserRow): number {
   const existing = db
-    .prepare("SELECT id FROM categories WHERE name = ?")
-    .get(name) as { id: number } | undefined;
+    .prepare("SELECT id FROM categories WHERE name = ? AND owner_user_id = ? AND builtin = 0 LIMIT 1")
+    .get(name, user.id) as { id: number } | undefined;
 
   if (existing) {
     return existing.id;
   }
 
-  return ensureCategory(name, color, false);
+  return ensureCategory(name, color, false, user.id, calendarTypeForManualCategoryName(name));
 }
 
 function textFromUnknown(value: unknown): string {
@@ -1691,11 +2804,11 @@ function validateEventInput(body: unknown) {
   };
 }
 
-function resolveCategory(input: ReturnType<typeof validateEventInput>): number {
+function resolveCategory(input: ReturnType<typeof validateEventInput>, user: UserRow): number {
   if (input.categoryName) {
     const existing = db
-      .prepare("SELECT id FROM categories WHERE name = ?")
-      .get(input.categoryName) as { id: number } | undefined;
+      .prepare("SELECT id FROM categories WHERE name = ? AND owner_user_id = ? AND builtin = 0 LIMIT 1")
+      .get(input.categoryName, user.id) as { id: number } | undefined;
 
     if (existing) {
       return existing.id;
@@ -1705,18 +2818,38 @@ function resolveCategory(input: ReturnType<typeof validateEventInput>): number {
       throw httpError(400, "Pick a color for the new category.");
     }
 
-    return ensureCategory(input.categoryName, input.categoryColor, false);
+    return ensureCategory(
+      input.categoryName,
+      input.categoryColor,
+      false,
+      user.id,
+      calendarTypeForManualCategoryName(input.categoryName)
+    );
   }
 
   const existing = db
-    .prepare("SELECT id FROM categories WHERE id = ?")
-    .get(input.categoryId) as { id: number } | undefined;
+    .prepare("SELECT id FROM categories WHERE id = ? AND owner_user_id = ? AND builtin = 0 LIMIT 1")
+    .get(input.categoryId, user.id) as { id: number } | undefined;
 
   if (!existing) {
-    throw httpError(400, "Category does not exist.");
+    throw httpError(400, "Choose a calendar you own.");
   }
 
   return existing.id;
+}
+
+function calendarTypeForManualCategoryName(name: string): CalendarType {
+  const normalized = name.trim().toLowerCase();
+  if (normalized === "birthday") {
+    return "birthday";
+  }
+  if (normalized === "anniversaries" || normalized === "anniversary") {
+    return "anniversary";
+  }
+  if (normalized === "personal calendar" || normalized === "personal") {
+    return "personal";
+  }
+  return "custom";
 }
 
 function cleanText(value: unknown, maxLength: number, optional = false): string {

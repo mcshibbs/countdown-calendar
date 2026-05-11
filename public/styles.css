@@ -67,6 +67,55 @@ a.button {
   -webkit-tap-highlight-color: transparent;
 }
 
+.auth-shell {
+  width: min(1100px, calc(100% - 32px));
+  margin: 0 auto;
+  padding: max(32px, env(safe-area-inset-top)) 0 36px;
+}
+
+.auth-card {
+  display: grid;
+  gap: 20px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  padding: 24px;
+}
+
+.auth-heading {
+  display: grid;
+  gap: 6px;
+}
+
+.auth-forms {
+  display: grid;
+  grid-template-columns: 0.82fr 1.18fr;
+  gap: 20px;
+  align-items: start;
+}
+
+.auth-panel {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-muted);
+  padding: 18px;
+}
+
+.auth-form,
+.mfa-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.mfa-panel input[readonly] {
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  font-size: 0.84rem;
+}
+
 .app-shell {
   width: min(1180px, calc(100% - 32px));
   margin: 0 auto;
@@ -181,6 +230,12 @@ h2 {
   margin-bottom: 0;
   font-size: 1.25rem;
   line-height: 1.2;
+}
+
+.user-badge {
+  margin: 8px 0 0;
+  color: var(--text-muted);
+  font-size: 0.9rem;
 }
 
 .header-actions,
@@ -493,6 +548,52 @@ input[type="color"]:disabled {
 .import-form {
   display: grid;
   gap: 14px;
+}
+
+.share-section {
+  display: grid;
+  gap: 8px;
+}
+
+.share-section h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.share-list {
+  display: grid;
+  gap: 8px;
+}
+
+.share-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 12px;
+}
+
+.share-item > div:first-child {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.share-item span,
+.empty-inline {
+  color: var(--text-muted);
+  font-size: 0.9rem;
+}
+
+.share-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .panel-toolbar {
@@ -974,6 +1075,10 @@ input[type="color"]:disabled {
 }
 
 @media (max-width: 860px) {
+  .auth-forms {
+    grid-template-columns: 1fr;
+  }
+
   .app-header,
   .panel-toolbar,
   .settings-grid {
@@ -999,6 +1104,16 @@ input[type="color"]:disabled {
 }
 
 @media (max-width: 560px) {
+  .auth-shell {
+    width: min(100% - 24px, 1100px);
+    padding: max(18px, env(safe-area-inset-top)) 0 28px;
+  }
+
+  .auth-card,
+  .auth-panel {
+    padding: 16px;
+  }
+
   .app-shell {
     width: min(100% - 24px, 1180px);
     padding: max(18px, env(safe-area-inset-top)) 0 28px;
@@ -1023,7 +1138,8 @@ input[type="color"]:disabled {
 
   .header-actions,
   .form-row,
-  .event-card {
+  .event-card,
+  .share-item {
     display: grid;
     grid-template-columns: 1fr;
   }
@@ -1164,6 +1280,12 @@ input[type="color"]:disabled {
   }
 
   .event-actions {
+    justify-content: stretch;
+  }
+
+  .share-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
     justify-content: stretch;
   }
 }
