@@ -21,6 +21,7 @@ type CategoryRow = {
 };
 
 type Recurrence = "none" | "daily" | "weekly" | "monthly" | "annual";
+type EventSource = "manual" | "federal" | "christian" | "american";
 
 type EventRow = {
   id: number;
@@ -29,7 +30,7 @@ type EventRow = {
   category_id: number;
   recurrence: Recurrence;
   recurrence_interval: number;
-  source: "manual" | "federal" | "christian";
+  source: EventSource;
   notes: string;
   details_enabled: number;
   detail_start_date: string;
@@ -53,7 +54,7 @@ type UpcomingEvent = {
   recurrence: Recurrence;
   recurrenceInterval: number;
   recurrenceLabel: string;
-  source: "manual" | "federal" | "christian";
+  source: EventSource;
   notes: string;
   detailsEnabled: boolean;
   detailSummary: string;
@@ -119,7 +120,7 @@ db.exec(`
     category_id INTEGER NOT NULL,
     recurrence TEXT NOT NULL CHECK (recurrence IN ('none', 'daily', 'weekly', 'monthly', 'annual')),
     recurrence_interval INTEGER NOT NULL DEFAULT 1,
-    source TEXT NOT NULL CHECK (source IN ('manual', 'federal', 'christian')),
+    source TEXT NOT NULL CHECK (source IN ('manual', 'federal', 'christian', 'american')),
     notes TEXT NOT NULL DEFAULT '',
     details_enabled INTEGER NOT NULL DEFAULT 0,
     detail_start_date TEXT NOT NULL DEFAULT '',
@@ -150,7 +151,7 @@ function migrateSchema(): void {
   ensureColumn("events", "details_enabled", "INTEGER NOT NULL DEFAULT 0");
   ensureColumn("events", "detail_start_date", "TEXT NOT NULL DEFAULT ''");
   ensureColumn("events", "recurrence_interval", "INTEGER NOT NULL DEFAULT 1");
-  migrateEventsRecurrenceConstraint();
+  migrateEventsTableConstraints();
 }
 
 function ensureColumn(tableName: string, columnName: string, definition: string): void {
@@ -170,18 +171,25 @@ function ensureEventIndexes(): void {
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_events_event_date ON events(event_date);
     CREATE INDEX IF NOT EXISTS idx_events_category_id ON events(category_id);
+    DROP INDEX IF EXISTS idx_seeded_holiday_unique;
     CREATE UNIQUE INDEX IF NOT EXISTS idx_seeded_holiday_unique
       ON events(title, event_date, source)
-      WHERE source IN ('federal', 'christian');
+      WHERE source IN ('federal', 'christian', 'american');
   `);
 }
 
-function migrateEventsRecurrenceConstraint(): void {
+function migrateEventsTableConstraints(): void {
   const row = db
     .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'events'")
     .get() as { sql: string } | undefined;
 
-  if (!row?.sql.includes("recurrence IN ('none', 'annual')")) {
+  if (
+    !row
+    || (
+      !row.sql.includes("recurrence IN ('none', 'annual')")
+      && row.sql.includes("'american'")
+    )
+  ) {
     return;
   }
 
@@ -196,7 +204,7 @@ function migrateEventsRecurrenceConstraint(): void {
       category_id INTEGER NOT NULL,
       recurrence TEXT NOT NULL CHECK (recurrence IN ('none', 'daily', 'weekly', 'monthly', 'annual')),
       recurrence_interval INTEGER NOT NULL DEFAULT 1,
-      source TEXT NOT NULL CHECK (source IN ('manual', 'federal', 'christian')),
+      source TEXT NOT NULL CHECK (source IN ('manual', 'federal', 'christian', 'american')),
       notes TEXT NOT NULL DEFAULT '',
       details_enabled INTEGER NOT NULL DEFAULT 0,
       detail_start_date TEXT NOT NULL DEFAULT '',
@@ -212,9 +220,15 @@ function migrateEventsRecurrenceConstraint(): void {
       title,
       event_date,
       category_id,
-      recurrence,
+      CASE
+        WHEN recurrence IN ('none', 'daily', 'weekly', 'monthly', 'annual') THEN recurrence
+        ELSE 'none'
+      END,
       COALESCE(recurrence_interval, 1),
-      source,
+      CASE
+        WHEN source IN ('manual', 'federal', 'christian', 'american') THEN source
+        ELSE 'manual'
+      END,
       COALESCE(notes, ''),
       COALESCE(details_enabled, 0),
       COALESCE(detail_start_date, ''),
@@ -295,6 +309,7 @@ function ensureCategory(name: string, color: string, builtin: boolean): number {
 function seedBuiltIns(): void {
   const federalCategoryId = ensureCategory("Federal Holidays", "#f97316", true);
   const christianCategoryId = ensureCategory("Christian Holidays", "#facc15", true);
+  const americanCategoryId = ensureCategory("American Holidays", "#dc2626", true);
   ensureCategory("Birthday", "#14b8a6", true);
   ensureCategory("Anniversaries", "#4338ca", true);
   const currentYear = new Date().getFullYear();
@@ -314,6 +329,10 @@ function seedBuiltIns(): void {
 
     for (const holiday of christianHolidays(year)) {
       insert.run(holiday.title, holiday.date, christianCategoryId, "christian", nowIso(), nowIso());
+    }
+
+    for (const holiday of americanHolidays(year)) {
+      insert.run(holiday.title, holiday.date, americanCategoryId, "american", nowIso(), nowIso());
     }
   }
 }
@@ -372,6 +391,31 @@ function christianHolidays(year: number): Array<{ title: string; date: string }>
   ];
 }
 
+function americanHolidays(year: number): Array<{ title: string; date: string }> {
+  const thanksgiving = nthWeekdayOfMonth(year, 11, 4, 4);
+
+  return [
+    { title: "Groundhog Day", date: formatDate(utcDate(year, 2, 2)) },
+    { title: "Valentine's Day", date: formatDate(utcDate(year, 2, 14)) },
+    { title: "St. Patrick's Day", date: formatDate(utcDate(year, 3, 17)) },
+    { title: "April Fools' Day", date: formatDate(utcDate(year, 4, 1)) },
+    { title: "Tax Day", date: taxDay(year) },
+    { title: "Earth Day", date: formatDate(utcDate(year, 4, 22)) },
+    { title: "Cinco de Mayo", date: formatDate(utcDate(year, 5, 5)) },
+    { title: "Mother's Day", date: formatDate(nthWeekdayOfMonth(year, 5, 0, 2)) },
+    { title: "Flag Day", date: formatDate(utcDate(year, 6, 14)) },
+    { title: "Father's Day", date: formatDate(nthWeekdayOfMonth(year, 6, 0, 3)) },
+    { title: "Patriot Day", date: formatDate(utcDate(year, 9, 11)) },
+    { title: "Grandparents Day", date: formatDate(addDays(nthWeekdayOfMonth(year, 9, 1, 1), 6)) },
+    { title: "Halloween", date: formatDate(utcDate(year, 10, 31)) },
+    { title: "Election Day", date: formatDate(firstTuesdayAfterFirstMondayOfNovember(year)) },
+    { title: "Black Friday", date: formatDate(addDays(thanksgiving, 1)) },
+    { title: "Cyber Monday", date: formatDate(addDays(thanksgiving, 4)) },
+    { title: "Christmas Eve", date: formatDate(utcDate(year, 12, 24)) },
+    { title: "New Year's Eve", date: formatDate(utcDate(year, 12, 31)) }
+  ];
+}
+
 function observedFixedHoliday(title: string, year: number, month: number, day: number) {
   const actual = utcDate(year, month, day);
   const observed = new Date(actual);
@@ -389,6 +433,23 @@ function observedFixedHoliday(title: string, year: number, month: number, day: n
     title: actualDate === observedDate ? title : `${title} (Observed)`,
     date: observedDate
   };
+}
+
+function taxDay(year: number): string {
+  let date = utcDate(year, 4, 15);
+  const weekday = date.getUTCDay();
+
+  if (weekday === 6) {
+    date = addDays(date, 2);
+  } else if (weekday === 0) {
+    date = addDays(date, 1);
+  }
+
+  return formatDate(date);
+}
+
+function firstTuesdayAfterFirstMondayOfNovember(year: number): Date {
+  return addDays(nthWeekdayOfMonth(year, 11, 1, 1), 1);
 }
 
 function easterSunday(year: number): Date {
@@ -616,9 +677,7 @@ function detailsForEvent(event: EventRow): HolidayDetail {
   }
 
   const key = normalizeHolidayTitle(event.title);
-  const detail = event.source === "federal"
-    ? FEDERAL_HOLIDAY_DETAILS[key]
-    : CHRISTIAN_HOLIDAY_DETAILS[key];
+  const detail = holidayDetailsForSource(event.source)[key];
 
   return detail ?? {
     summary: "",
@@ -629,6 +688,22 @@ function detailsForEvent(event: EventRow): HolidayDetail {
 
 function normalizeHolidayTitle(title: string): string {
   return title.replace(/\s+\(Observed\)$/i, "").trim();
+}
+
+function holidayDetailsForSource(source: EventSource): Record<string, HolidayDetail> {
+  if (source === "federal") {
+    return FEDERAL_HOLIDAY_DETAILS;
+  }
+
+  if (source === "christian") {
+    return CHRISTIAN_HOLIDAY_DETAILS;
+  }
+
+  if (source === "american") {
+    return AMERICAN_HOLIDAY_DETAILS;
+  }
+
+  return {};
 }
 
 const FEDERAL_HOLIDAY_DETAILS: Record<string, HolidayDetail> = {
@@ -754,6 +829,99 @@ const CHRISTIAN_HOLIDAY_DETAILS: Record<string, HolidayDetail> = {
     summary: "Celebrates the birth of Jesus Christ.",
     startDate: "0336-12-25",
     startLabel: "Date attested"
+  }
+};
+
+const AMERICAN_HOLIDAY_DETAILS: Record<string, HolidayDetail> = {
+  "Groundhog Day": {
+    summary: "A folk observance centered on whether a groundhog is said to predict an early spring.",
+    startDate: "1887-02-02",
+    startLabel: "Popular ceremony since"
+  },
+  "Valentine's Day": {
+    summary: "A widely observed day for cards, gifts, and expressions of affection.",
+    startDate: "1840-01-01",
+    startLabel: "U.S. cards popular by"
+  },
+  "St. Patrick's Day": {
+    summary: "Celebrates Irish heritage and St. Patrick, with parades and community celebrations across the United States.",
+    startDate: "1762-03-17",
+    startLabel: "U.S. parade roots"
+  },
+  "April Fools' Day": {
+    summary: "A lighthearted day for jokes, pranks, and playful hoaxes.",
+    startDate: "1700-01-01",
+    startLabel: "Popular by"
+  },
+  "Tax Day": {
+    summary: "The usual deadline for filing federal individual income tax returns, adjusted here when April 15 falls on a weekend.",
+    startDate: "1955-04-15",
+    startLabel: "Modern deadline since"
+  },
+  "Earth Day": {
+    summary: "Promotes environmental awareness and action.",
+    startDate: "1970-04-22",
+    startLabel: "First observed"
+  },
+  "Cinco de Mayo": {
+    summary: "Commemorates Mexico's 1862 victory at Puebla and is widely observed in the United States as a celebration of Mexican heritage.",
+    startDate: "1863-05-05",
+    startLabel: "U.S. observance roots"
+  },
+  "Mother's Day": {
+    summary: "Honors mothers, motherhood, and maternal bonds.",
+    startDate: "1914-05-09",
+    startLabel: "U.S. proclamation signed"
+  },
+  "Flag Day": {
+    summary: "Commemorates the adoption of the United States flag.",
+    startDate: "1916-05-30",
+    startLabel: "Presidential proclamation"
+  },
+  "Father's Day": {
+    summary: "Honors fathers, fatherhood, and paternal bonds.",
+    startDate: "1972-04-24",
+    startLabel: "Federal recognition signed"
+  },
+  "Patriot Day": {
+    summary: "A day of remembrance for those killed in the September 11, 2001 terrorist attacks.",
+    startDate: "2001-12-18",
+    startLabel: "Established"
+  },
+  "Grandparents Day": {
+    summary: "Honors grandparents and intergenerational family relationships.",
+    startDate: "1978-08-03",
+    startLabel: "Established"
+  },
+  "Halloween": {
+    summary: "A cultural holiday associated with costumes, trick-or-treating, and autumn celebrations.",
+    startDate: "1900-01-01",
+    startLabel: "Popular by"
+  },
+  "Election Day": {
+    summary: "The traditional U.S. general election day, the Tuesday after the first Monday in November.",
+    startDate: "1845-01-23",
+    startLabel: "Federal election date set"
+  },
+  "Black Friday": {
+    summary: "The shopping day after Thanksgiving, often treated as the start of the holiday shopping season.",
+    startDate: "1950-01-01",
+    startLabel: "Term popularized by"
+  },
+  "Cyber Monday": {
+    summary: "An online shopping observance on the Monday after Thanksgiving.",
+    startDate: "2005-11-28",
+    startLabel: "First named"
+  },
+  "Christmas Eve": {
+    summary: "The evening before Christmas Day, commonly marked by gatherings, services, and holiday traditions.",
+    startDate: "1800-01-01",
+    startLabel: "Common U.S. custom by"
+  },
+  "New Year's Eve": {
+    summary: "The final day of the calendar year, commonly marked by countdowns and celebrations.",
+    startDate: "1904-12-31",
+    startLabel: "Times Square roots"
   }
 };
 

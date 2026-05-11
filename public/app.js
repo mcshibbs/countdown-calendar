@@ -877,6 +877,9 @@ function labelForSource(source) {
     if (source === "christian") {
         return "Christian";
     }
+    if (source === "american") {
+        return "American";
+    }
     return "Manual";
 }
 async function apiGet(url) {

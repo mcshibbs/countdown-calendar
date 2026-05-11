@@ -7,6 +7,7 @@ type Category = {
 
 type Recurrence = "none" | "daily" | "weekly" | "monthly" | "annual";
 type DisplayMode = "list" | "month" | "week" | "day";
+type EventSource = "manual" | "federal" | "christian" | "american";
 
 type CalendarEvent = {
   id: number;
@@ -21,7 +22,7 @@ type CalendarEvent = {
   recurrence: Recurrence;
   recurrenceInterval: number;
   recurrenceLabel: string;
-  source: "manual" | "federal" | "christian";
+  source: EventSource;
   notes: string;
   detailsEnabled: boolean;
   detailSummary: string;
@@ -1111,6 +1112,9 @@ function labelForSource(source: CalendarEvent["source"]): string {
   }
   if (source === "christian") {
     return "Christian";
+  }
+  if (source === "american") {
+    return "American";
   }
   return "Manual";
 }
